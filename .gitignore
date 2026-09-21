@@ -1,0 +1,29 @@
+node_modules/
+dist/
+*.local
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# Test output
+tests/*.bundle.mjs
+# Training artifacts
+datasets/
+traces/
+training/runs/
+training/finetune/config.json
+training/finetune/train.py
+training/finetune/merge.py
+# Python (training environment)
+__pycache__/
+*.pyc
+.venv/
+venv/

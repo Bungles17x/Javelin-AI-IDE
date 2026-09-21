@@ -1,0 +1,28 @@
+{
+  "model": "javelin-coder",
+  "stream": false,
+  "messages": [
+    {
+      "role": "user",
+      "content": "List the files so you can see the project structure."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "list_files",
+        "description": "List files in the project",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "directory"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "javelin-ai-coding-assistant",
+  "version": "1.0.0",
+  "description": "An AI-powered coding assistant that can help with any coding task",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node tests/run.mjs",
+    "train:dataset": "node training/build-dataset.mjs",
+    "train:prepare": "node training/finetune/prepare.mjs",
+    "train:run": "node training/train.mjs",
+    "train:status": "node training/status.mjs",
+    "models": "node training/models.mjs",
+    "model:local": "node training/build-local-model.mjs",
+    "capture": "node training/capture.mjs",
+    "capture:auto": "node training/capture.mjs --auto",
+    "serve:model": "node training/serve-model.mjs"
+  },
+  "dependencies": {
+    "clsx": "^2.1.0",
+    "lucide-react": "^0.344.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^2.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.18",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "vite": "^5.1.6"
+  }
+}

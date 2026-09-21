@@ -1,0 +1,235 @@
+{
+  "name": "javelin-ai-assistant",
+  "displayName": "Javelin AI Assistant",
+  "description": "An AI-powered coding assistant - concise, direct, and technically accurate",
+  "publisher": "javelin",
+  "version": "1.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/javelin-ai/javelin-ai-assistant.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "icon": "icon.png",
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "javelin.openAssistant",
+        "title": "Open Assistant",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.setApiKey",
+        "title": "Set API Key",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.askAboutSelection",
+        "title": "Ask About Selection",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.runJavelinTask",
+        "title": "Run Javelin Task…",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.runAgentTask",
+        "title": "Run Agent Task…",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.openCodingAgent",
+        "title": "Open Coding Agent",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.stopAgent",
+        "title": "Stop Agent",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.restoreCheckpoint",
+        "title": "Restore Checkpoint…",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.selectProvider",
+        "title": "Select Model Provider",
+        "category": "Javelin AI"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "javelin.askAboutSelection",
+          "when": "editorHasSelection",
+          "group": "javelin@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "javelin.openAssistant"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "javelin-sidebar",
+          "title": "Javelin AI",
+          "icon": "$(rocket)"
+        }
+      ]
+    },
+    "views": {
+      "javelin-sidebar": [
+        {
+          "type": "webview",
+          "id": "javelin.assistant",
+          "name": "AI Assistant",
+          "contextualTitle": "Javelin AI Assistant",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Javelin AI",
+      "properties": {
+        "javelin.provider": {
+          "type": "string",
+          "default": "local",
+          "enum": [
+            "javelin",
+            "local",
+            "groq",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Your own fine-tuned Javelin model, served locally (no API key)",
+            "Keyless local model via Ollama — code never leaves your machine",
+            "Groq cloud inference (needs an API key)",
+            "Any other OpenAI-compatible endpoint"
+          ],
+          "markdownDescription": "Where the model runs. **Javelin (fine-tuned)** serves your own trained weights and needs no API key. See [docs/TRAINING.md](docs/TRAINING.md).",
+          "order": 0
+        },
+        "javelin.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Override the provider endpoint base URL (e.g. http://localhost:11434/v1). Leave blank for the provider default.",
+          "order": 1
+        },
+        "javelin.model": {
+          "type": "string",
+          "default": "javelin-coder",
+          "enum": [
+            "javelin-coder",
+            "javelin-coder-80b",
+            "javelin",
+            "qwen2.5-coder:7b",
+            "qwen2.5-coder:14b",
+            "deepseek-coder-v2:16b",
+            "llama3.1:8b",
+            "codellama:13b",
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "openai/gpt-oss-120b",
+            "qwen/qwen3-32b"
+          ],
+          "enumDescriptions": [
+            "Javelin Coder — your own Javelin model running locally. Build it once with `npm run model:local`. Keyless, offline, on your machine.",
+            "Javelin Coder 80B — the flagship Javelin model. Requires the 'Javelin (fine-tuned)' provider, and must be trained + merged first (run `npm run models` to check).",
+            "Javelin (latest) — your trained Javelin weights, served locally.",
+            "Qwen2.5 Coder 7B — keyless local model via Ollama (default).",
+            "Qwen2.5 Coder 14B — larger local coder model.",
+            "DeepSeek Coder V2 16B — local coder model.",
+            "Llama 3.1 8B — general local model.",
+            "Code Llama 13B — local coder model.",
+            "Llama 3.3 70B — Groq cloud (fast, needs an API key).",
+            "Llama 3.1 8B Instant — Groq cloud, fastest.",
+            "GPT-OSS 120B — Groq cloud.",
+            "Qwen3 32B — Groq cloud."
+          ],
+          "markdownDescription": "Model id to use. **Javelin Coder 80B** is Javelin's own flagship model — select the **Javelin (fine-tuned)** provider for it, and run `npm run models` to confirm it has actually been trained and merged. Local models are Ollama tags (e.g. `qwen2.5-coder:7b`).",
+          "order": 2
+        },
+        "javelin.groqApiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "API key for cloud providers (free at https://console.groq.com/keys). Prefer the **Javelin AI: Set API Key** command — it stores the key encrypted instead of in plain text here. Not needed for the local provider.",
+          "order": 3
+        },
+        "javelin.autonomy": {
+          "type": "string",
+          "default": "ask",
+          "enum": [
+            "ask",
+            "auto-edit",
+            "full"
+          ],
+          "enumDescriptions": [
+            "Ask before every file change and every non-allowlisted command.",
+            "Apply edits and deletions without asking; still confirm unusual commands.",
+            "Do everything unattended — plan, edit, delete, run. Only catastrophic commands stay blocked."
+          ],
+          "markdownDescription": "How much Javelin may do without stopping to ask. **Auto-edit** and **Full** let the agent complete a whole task (including deleting files) in one run, taking a checkpoint at the start instead of pausing at each change. Catastrophic commands (`rm -rf /`, disk formatting, etc.) are always refused.",
+          "order": 4
+        },
+        "javelin.agentAutoApproveSafeCommands": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run test/build/lint commands without an approval prompt. Ignored when javelin.autonomy is auto-edit or full.",
+          "order": 5
+        },
+        "javelin.agentMaxSteps": {
+          "type": "number",
+          "default": 24,
+          "description": "Maximum number of agent steps before it stops and reports back.",
+          "order": 6
+        },
+        "javelin.agentLiveEditInEditor": {
+          "type": "boolean",
+          "default": true,
+          "description": "Apply the agent's edits through a real, visible editor so you watch the code change in place (instead of a silent disk write).",
+          "order": 7
+        },
+        "javelin.agentAnimateEdits": {
+          "type": "boolean",
+          "default": true,
+          "description": "Animate added lines so the agent's edits look like they are being typed into the editor. Turn off to snap edits in instantly.",
+          "order": 8
+        },
+        "javelin.agentEditSpeedMs": {
+          "type": "number",
+          "default": 24,
+          "description": "Delay in milliseconds between animated chunks when the agent types an edit. Lower is faster.",
+          "order": 9
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {}
+}

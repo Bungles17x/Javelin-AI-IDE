@@ -1,0 +1,56 @@
+{
+  "id": "javelin-coder-80b",
+  "displayName": "Javelin Coder 80B",
+  "servedAs": "javelin-coder-80b",
+  "className": "80b",
+  "summary": "The flagship Javelin coder: a ~72B-parameter open base, adapted with Javelin's tool-calling and verify/repair policy. This is a declared target — it is NOT trained or served until real weights exist.",
+  "base": {
+    "model": "Qwen/Qwen2.5-Coder-72B-Instruct",
+    "parametersBillion": 72,
+    "approximate": true,
+    "note": "There is no open 80B coder today, so '80B class' is served by the real 72B open base. The display name is the product name; this field is the truth about what is actually underneath."
+  },
+  "method": "qlora",
+  "adapterName": "javelin-coder-80b-lora",
+  "output": {
+    "dir": "training/runs/javelin-coder-80b",
+    "mergedDir": "training/runs/javelin-coder-80b/merged"
+  },
+  "requirements": {
+    "trainVramGb": 80,
+    "trainNote": "QLoRA fine-tuning of a 72B base needs roughly 80GB of VRAM (one H100/A100-80GB) or multi-GPU sharding. It does not fit consumer hardware.",
+    "mergeVramGb": 160,
+    "mergeNote": "Merging the adapter back into full bf16 weights needs ~160GB, so it is done on a rented multi-GPU host, not locally.",
+    "serveVramGb": 48,
+    "serveNote": "Serving is possible in 4-bit on a single 48GB card, or across two 24GB cards. A quantized GGUF can run on far less, slower."
+  },
+  "training": {
+    "recommendedDataset": "datasets/javelin-coder-80b",
+    "minRecords": 5000,
+    "note": "A model this size is only worth training on a large, high-quality, human-reviewed dataset. Promoting a small synthetic set to 72B wastes the compute."
+  },
+  "paths": {
+    "rented": {
+      "viable": true,
+      "detail": "Recommended: a single H100 80GB (or 2xA100-80GB for the merge) for a few hours on RunPod/Lambda/CoreWeave. This is the only realistic route."
+    },
+    "local": {
+      "viable": false,
+      "detail": "Not trainable on consumer GPUs. A 16GB or 24GB card cannot hold the base, the optimizer state, or the activations."
+    },
+    "cpu": {
+      "viable": false,
+      "detail": "Not feasible. CPU LoRA works up to ~1.5B; a 72B base is many orders of magnitude beyond it."
+    }
+  },
+  "status": {
+    "declared": true,
+    "trained": false,
+    "served": false,
+    "asOf": "2026-01-01",
+    "note": "Set trained/served true ONLY by the pipeline when a verified adapter and served weights actually exist. Never edit these by hand to claim a model that was not built."
+  },
+  "lineage": {
+    "identity": "trained against src/core/identity.js MODEL_IDENTITY (see training/provenance.mjs)"
+  }
+}

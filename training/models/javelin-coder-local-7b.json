@@ -1,0 +1,45 @@
+{
+  "id": "javelin-coder-local-7b",
+  "displayName": "Javelin Coder (local, 7B)",
+  "servedAs": "javelin-coder",
+  "className": "7b",
+  "summary": "Your own Javelin model, running entirely on this machine via Ollama. A DERIVED model: it adopts Javelin's identity through the system prompt over a local 7B coder base. It is not a fine-tune — no weights were trained.",
+  "base": {
+    "model": "qwen2.5-coder:7b",
+    "parametersBillion": 7,
+    "approximate": false,
+    "note": "Builds from whichever local coder base is installed (qwen2.5-coder:7b by default). The base weights remain the base author's; what Javelin adds here is the identity."
+  },
+  "method": "derive",
+  "methodNote": "Ollama Modelfile (FROM + SYSTEM + PARAMETER). This is NOT training. It sets the system prompt and sampling defaults; it does not change the weights.",
+  "adapterName": null,
+  "output": {
+    "dir": null,
+    "mergedDir": null
+  },
+  "build": {
+    "command": "npm run model:local",
+    "creates": "javelin-coder",
+    "modelfile": "training/Modelfile.local"
+  },
+  "requirements": {
+    "serveVramGb": 6,
+    "serveNote": "A 7B model in Q4 fits comfortably in ~6GB VRAM (fits this machine's 10GB card), and runs on CPU too, slower."
+  },
+  "paths": {
+    "local": {
+      "viable": true,
+      "detail": "Fully local. `npm run model:local` builds it in Ollama on this machine; no key, no cloud, no data leaving the computer."
+    },
+    "cloud": {
+      "viable": false,
+      "detail": "Not a cloud model — it runs on your hardware by design."
+    }
+  },
+  "status": {
+    "declared": true,
+    "trained": false,
+    "served": false,
+    "note": "Not a trained model. 'Served' is true once `npm run model:local` has created the model in Ollama and it answers. This manifest documents a derived local model, not a fine-tune."
+  }
+}
