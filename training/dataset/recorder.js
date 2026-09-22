@@ -17,7 +17,6 @@
  *   await javelin.think({ task, workspace, onEvent: recorder.observe })
  *   const trajectory = recorder.finish({ status: 'done' })
  */
-
 import { SOURCE, recordId, JDF_VERSION } from './format.js'
 
 /**

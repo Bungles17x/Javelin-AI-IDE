@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import {
   Search, Play, Terminal, FileCode, Save, CheckCircle2, XCircle, Loader2, AlertTriangle,
-  RotateCcw, ChevronDown, ChevronRight, Clock,
+  RotateCcw, ChevronDown, ChevronRight, Clock, Check,
 } from 'lucide-react'
 import { Button } from './Button'
 import { DiffView } from './DiffView'
@@ -112,6 +112,45 @@ function StepRow({ step, onUndo }) {
   )
 }
 
+/**
+ * The plan as a live task checklist.
+ *
+ * This is the "what will it do" view: one row per planned step, ticked off in order
+ * as real work succeeds, so progress is visible rather than inferred.
+ */
+export function TaskList({ steps }) {
+  if (!steps?.length) return null
+  const activeIndex = steps.findIndex((s) => !s.done)
+  return (
+    <div className="rounded-lg border bg-card/60 px-3 py-2 text-xs">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Tasks</div>
+      <ul className="space-y-1">
+        {steps.map((step, i) => {
+          const isDone = Boolean(step.done)
+          const isActive = !isDone && i === activeIndex
+          return (
+            <li
+              key={i}
+              className={[
+                'flex items-start gap-2',
+                isDone ? 'text-muted-foreground line-through' : '',
+                isActive ? 'font-medium' : '',
+              ].join(' ')}
+            >
+              <span className={isDone ? 'text-green-400' : 'text-muted-foreground'}>
+                {isDone ? '✓' : isActive ? '▸' : '○'}
+              </span>
+              <span>
+                {i + 1}. {step.text}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
 /** Restore-to-checkpoint control. */
 export function CheckpointBar({ checkpoints, onRestore }) {
   if (!checkpoints?.length) return null
@@ -132,6 +171,61 @@ export function CheckpointBar({ checkpoints, onRestore }) {
           {cp.label}
         </Button>
       ))}
+    </div>
+  )
+}
+
+/**
+ * The keep-or-undo decision after a run that changed files.
+ *
+ * Revert is always offered, because the runtime takes its own checkpoint before
+ * the run — it does not depend on the agent having remembered to make one.
+ */
+export function RunControls({ fileCount, status, onAccept, onRevert, onRevertMessage }) {
+  // Reverting a message is meaningful even when nothing changed, so the bar renders
+  // whenever there is either a change to decide on or a message to undo.
+  if (!fileCount && !onRevertMessage) return null
+  const rough = status && status !== 'done'
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-card/60 px-3 py-2 text-xs">
+      {fileCount ? <span>This run changed {fileCount} file(s).</span> : <span>Finished.</span>}
+      <div className="flex items-center gap-2">
+        {fileCount ? (
+          <>
+            <Button size="sm" className="h-6 gap-1 px-2 text-[11px]" onClick={onAccept}>
+              <Check className="h-3 w-3" />
+              Accept all
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 gap-1 px-2 text-[11px] text-red-400"
+              onClick={onRevert}
+              title="Undo every change this run made, back to how the workspace was before it started"
+            >
+              <RotateCcw className="h-3 w-3" />
+              Revert all
+            </Button>
+          </>
+        ) : null}
+        {onRevertMessage && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 gap-1 px-2 text-[11px] text-red-400"
+            onClick={onRevertMessage}
+            title="Discard your last message and everything after it, and restore the files to before it ran"
+          >
+            <RotateCcw className="h-3 w-3" />
+            Revert my last message
+          </Button>
+        )}
+      </div>
+      {rough && (
+        <span className="text-muted-foreground">
+          {status === 'aborted' ? 'Run was stopped part-way' : 'Run failed'} — reverting is recommended.
+        </span>
+      )}
     </div>
   )
 }

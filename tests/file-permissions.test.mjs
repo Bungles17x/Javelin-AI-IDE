@@ -278,5 +278,56 @@ console.log('\n11. AUTONOMY=full: a catastrophic command is STILL refused outrig
   check('and it never reached the approval path', approvals === 0, String(approvals))
 }
 
+console.log('\n12. AUTONOMY=auto-edit: edits run freely, but a DELETE still asks first')
+{
+  const approvals = []
+  const ws = new VirtualWorkspace(WORKSPACE)
+  const javelin = makeJavelin([
+    { text: '', toolCalls: [write('e1', 'src/added.js', 'new\n')] },
+    { text: '', toolCalls: [del('e2', 'src/old.js')] },
+    { text: '', toolCalls: [stop('e3', 'done')] },
+  ])
+  await javelin.think({
+    task: 'add a file, then delete one',
+    workspace: ws,
+    runCommand: async () => ({ exitCode: 0, stdout: 'ok', stderr: '' }),
+    onEvent: () => { },
+    requestApproval: async (req) => {
+      approvals.push(req.name)
+      return { approved: true }
+    },
+    autonomy: AUTONOMY.AUTO_EDIT,
+  })
+  // auto-edit means "trust me on code changes" — that is the write, not the deletion.
+  check('auto-edit did NOT prompt for the write', !approvals.includes('write_file'), approvals.join(','))
+  check('auto-edit DID prompt before deleting a file',
+    approvals.includes('delete_file'), approvals.join(','))
+  check('the delete carried a preview diff', approvals.length > 0)
+  check('the write still applied', ws.exists('src/added.js'))
+}
+
+console.log('\n13. AUTONOMY=full is the ONLY level that grants deletions without asking')
+{
+  const approvals = []
+  const ws = new VirtualWorkspace(WORKSPACE)
+  const javelin = makeJavelin([
+    { text: '', toolCalls: [del('f1', 'src/old.js')] },
+    { text: '', toolCalls: [stop('f2', 'done')] },
+  ])
+  await javelin.think({
+    task: 'delete a file',
+    workspace: ws,
+    runCommand: async () => ({ exitCode: 0, stdout: 'ok', stderr: '' }),
+    onEvent: () => { },
+    requestApproval: async (req) => {
+      approvals.push(req.name)
+      return { approved: true }
+    },
+    autonomy: AUTONOMY.FULL,
+  })
+  check('full autonomy deleted without prompting', approvals.length === 0, approvals.join(','))
+  check('and the file is actually gone', !ws.exists('src/old.js'))
+}
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}\n`)
 process.exit(failures === 0 ? 0 : 1)

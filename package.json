@@ -1,7 +1,25 @@
 {
   "name": "javelin-ai-coding-assistant",
   "version": "1.0.0",
-  "description": "An AI-powered coding assistant that can help with any coding task",
+  "description": "An AI coding agent that inspects, plans, edits and verifies your code — in the browser and in VS Code.",
+  "license": "MIT",
+  "author": "Javelin AI",
+  "homepage": "https://github.com/javelin-ai/javelin-ai-assistant#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/javelin-ai/javelin-ai-assistant.git"
+  },
+  "bugs": {
+    "url": "https://github.com/javelin-ai/javelin-ai-assistant/issues"
+  },
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "llm",
+    "ollama",
+    "vscode",
+    "code-assistant"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite",

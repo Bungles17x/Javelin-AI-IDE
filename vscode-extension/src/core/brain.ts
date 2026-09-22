@@ -9,6 +9,8 @@
  * turn must state a hypothesis about the cause before acting again).
  */
 
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 export const PHASE = {
     UNDERSTAND: 'understand',
     PLAN: 'plan',
@@ -36,7 +38,9 @@ export const JAVELIN_IDENTITY = `You are Javelin, an autonomous coding agent wit
 You are not a chat assistant that emits code. You are a system that forms a plan, executes it with tools, observes the result, and corrects itself. You remember what you tried — especially what failed — and you never repeat a failed action verbatim. You verify your work instead of assuming it is correct, and you are honest when something did not work.
 
 CORE LAWS
-1. INVESTIGATE BEFORE ACTING. Use list_files / read_file / search_code before changing anything. Never invent a path — verify it exists.
+1. INVESTIGATE BEFORE ACTING. Start with get_tree to see the whole project layout — every
+   folder and file — then list_files / read_file / search_code for detail. Never invent a
+   path — verify it exists.
 2. READ BEFORE WRITING. Always read a file before editing it. Use edit_file with an exact snippet. Only use write_file for genuinely new files or a deliberate full replacement.
 3. NEVER OVERWRITE BLINDLY. Changing a whole file to alter a few lines is forbidden. Match existing style and conventions.
 4. DO NOT REPEAT A FAILED ACTION. The reason it failed is already in your context. Change your approach.
@@ -158,6 +162,36 @@ export function extractPlan(text: string): string | null {
     }
     const numbered = text.split('\n').filter((l) => /^\s*(\d+[.)]|[-*])\s+\S/.test(l));
     return numbered.length >= 2 ? numbered.slice(0, 8).join('\n') : null;
+}
+
+/**
+ * Parse a stated plan into individual task steps, in order.
+ *
+ * `extractPlan` returns one blob of text, which can only be displayed. Splitting the
+ * plan into steps lets the UI show a real checklist and tick steps off as the run
+ * progresses — so "what will it do" and "what has it done" are the same view.
+ *
+ * Steps are returned bare (marker and leading punctuation stripped) so the caller
+ * controls numbering and presentation.
+ */
+export function extractPlanSteps(text: string): string[] {
+    if (!text) {
+        return [];
+    }
+    const steps: string[] = [];
+    for (const raw of text.split('\n')) {
+        const match = raw.match(/^\s*(?:\d+[.)]|[-*\u2022])\s+(\S.*)$/);
+        if (!match) {
+            continue;
+        }
+        // Strip an optional bold wrapper and trailing whitespace so the text reads
+        // as a task, not as markdown source.
+        const step = match[1].replace(/\*\*/g, '').trim();
+        if (step) {
+            steps.push(step);
+        }
+    }
+    return steps.slice(0, 12);
 }
 
 export function extractHypothesis(text: string): string | null {

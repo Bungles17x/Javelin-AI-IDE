@@ -65,6 +65,9 @@ OpenRouter, your own server) and select the *Custom* provider.
 | `Javelin AI: Open Assistant` | Focus the sidebar panel |
 | `Javelin AI: Run Agent Task…` | Prompt for a task and run the autonomous agent |
 | `Javelin AI: Stop Agent` | Halt the running agent |
+| `Javelin AI: Revert All Changes (undo last run)` | Undo every change the last run made, back to how the workspace was before it started |
+| `Javelin AI: Accept All Changes (keep last run)` | Keep the last run's changes and retire the revert offer |
+| `Javelin AI: Revert to My Last Message (undo chat and files)` | Truncate the conversation back to your last message and restore the files to before it ran |
 | `Javelin AI: Restore Checkpoint…` | Pick a checkpoint and revert the workspace to it |
 | `Javelin AI: Select Model Provider` | Choose local / Groq / custom |
 | `Javelin AI: Set API Key` | Store or clear the cloud API key |
@@ -78,8 +81,52 @@ OpenRouter, your own server) and select the *Custom* provider.
 | `javelin.baseUrl` | `""` | Endpoint override; blank uses the provider default |
 | `javelin.model` | `qwen2.5-coder:7b` | Model id (an Ollama tag for local models) |
 | `javelin.groqApiKey` | `""` | Fallback key, used only if no key is in SecretStorage |
-| `javelin.agentAutoApproveSafeCommands` | `true` | Skip the prompt for test/build/lint. File edits always ask. |
+| `javelin.autonomy` | `ask` | How much runs unprompted: `ask` (everything asks), `auto-edit` (edits apply, deleting a file still asks), `full` (edits and deletes run unattended) |
+| `javelin.agentAutoApproveSafeCommands` | `true` | Skip the prompt for test/build/lint. Under `ask`, file edits always ask. |
 | `javelin.agentMaxSteps` | `24` | Step cap before the agent stops and reports back |
+
+### File permissions
+Deleting a file is the one irreversible action, so it is gated more tightly than
+editing and can never be blanket-approved:
+
+| Action | `ask` | `auto-edit` | `full` |
+|---|---|---|---|
+| Read / search | auto | auto | auto |
+| Edit or add a file | asks | auto | auto |
+| Delete a file | asks | **asks** (per file) | auto |
+| Test / build / lint | auto | auto | auto |
+| Other commands | asks | asks | auto |
+| Catastrophic command | refused | refused | refused |
+
+Choosing **always allow** on a deletion only covers *that* file — it does not become
+permission to delete anything else.
+
+### Accept or revert a run
+
+Every run takes a **safety checkpoint automatically**, before the first tool call — you
+do not have to trust the agent to remember one. When a run changes files you are
+offered two buttons, and the same actions are in the Command Palette:
+
+- **Accept all** — keep the changes.
+- **Revert all** — put every changed file back exactly as it was before the run, no
+  matter how badly the run went.
+
+This is why a bad run cannot corrupt your project: the escape hatch is created before
+the agent starts, not by the agent's own good judgement. If the workspace cannot be
+snapshotted, the run **refuses to edit anything** rather than proceeding unprotected.
+
+**Revert to your last message** goes further: it removes that message and everything
+after it from the conversation *and* restores the files to before it ran. Your wording
+comes back in the input box, so the usual fix for a badly-phrased request — "say it
+again, differently" — does not mean retyping it.
+
+### Seeing the project, and what Javelin plans to do
+
+The agent starts by reading the **project tree** (`get_tree`), which shows every folder
+and file nested to a depth limit — so it grounds itself in the real layout instead of
+guessing at paths one directory at a time. When it states a plan, that plan is turned
+into a **task checklist** that ticks off as real work succeeds. Steps are only marked
+done on success: a retry of a failed action never reads as progress.
 
 ## Honest limits
 

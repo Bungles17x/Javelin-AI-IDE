@@ -30,7 +30,8 @@
  * 5. **Versioned and additive.** `JDF_VERSION` gates compatibility. New fields may
  *    be added; existing ones are not repurposed, so old datasets stay readable.
  */
-
+//! IMPORTANT: this file is the canonical definition of JDF. If you change it, you must also update the docs and the validator in training/dataset/format.js.
+//y Warning: the validator is not a unit test. It is a runtime check that will reject any dataset that does not conform to the schema. If you change the schema, you must also update the validator.
 export const JDF_VERSION = '1.0.0'
 
 /** How a training example came to exist. Provenance is not optional. */

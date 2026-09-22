@@ -1,3 +1,5 @@
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 import * as vscode from 'vscode';
 import { generateCodeStreaming, getErrorMessage, getApiKey, ChatMessage } from './aiService';
 import { getNonce } from './getNonce';
@@ -21,6 +23,19 @@ interface CheckpointInfo {
     label: string;
     timestamp: number;
     fileCount: number;
+}
+
+/**
+ * A marker for one user message: where it sits in the conversation, and the
+ * workspace checkpoint captured just before it was handled. "Revert to my last
+ * message" needs both — the text to truncate and the files to restore.
+ */
+interface MessageMark {
+    entryIndex: number;
+    label: string;
+    timestamp: number;
+    /** Absent when no workspace was open, or no checkpoint could be taken. */
+    checkpointId?: string;
 }
 
 /**
@@ -64,6 +79,12 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private _conversationHistory: ChatEntry[] = [];
     private _disposables: vscode.Disposable[] = [];
+    /**
+     * One entry per user message: its index in the conversation and the workspace
+     * checkpoint captured just before it was handled. Reverting to a message needs
+     * both — the conversation to truncate and the files to restore.
+     */
+    private _messageMarks: MessageMark[] = [];
     private _pendingContext = '';
     private _activeRequest?: vscode.CancellationTokenSource;
 
@@ -75,6 +96,12 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
     private _agentAbort?: AbortController;
     private _checkpoints: CheckpointInfo[] = [];
     private _workspace?: VsCodeWorkspace;
+    /**
+     * The automatic checkpoint taken before the most recent run. This is the target
+     * of "Revert All" — it always exists, so there is always a way back even if the
+     * agent corrupted files or never checkpointed itself.
+     */
+    private _runBaseline?: string;
     private _pendingApproval?: {
         request: ApprovalRequest;
         resolve: (decision: { approved: boolean; remember: boolean }) => void;
@@ -119,11 +146,38 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
 
         webviewView.webview.html = this._getHtmlForWebview();
 
-        this.loadConversation();
+        // Setup must not be able to leave the panel dead. If anything here throws and
+        // the message listener is never registered, EVERY button silently stops
+        // working — the webview posts messages that nobody receives. Fail visibly
+        // instead, and always register the listener last.
+        try {
+            this.loadConversation();
+        } catch (error) {
+            vscode.window.showErrorMessage(
+                `Javelin AI: could not load saved state — ${getErrorMessage(error)}`,
+            );
+            this._conversationHistory = [];
+            this._checkpoints = [];
+            this._messageMarks = [];
+        }
 
         webviewView.webview.onDidReceiveMessage(
             async (message) => {
-                switch (message.command) {
+                try {
+                    await this.dispatchMessage(message);
+                } catch (error) {
+                    // One failing action must not wedge the whole panel.
+                    vscode.window.showErrorMessage(`Javelin AI: ${getErrorMessage(error)}`);
+                }
+            },
+            null,
+            this._disposables,
+        );
+    }
+
+    /** Route one message from the webview to its handler. */
+    private async dispatchMessage(message: any): Promise<void> {
+        switch (message.command) {
                     case 'ready':
                         this.postHistory();
                         this.postCheckpoints();
@@ -169,11 +223,16 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     case 'restoreCheckpoint':
                         await this.restoreCheckpoint(message.id);
                         break;
+                    case 'revertAll':
+                        await this.revertAll();
+                        break;
+                    case 'revertToLastMessage':
+                        await this.revertToLastMessage();
+                        break;
+                    case 'acceptAll':
+                        this.acceptAll();
+                        break;
                 }
-            },
-            null,
-            this._disposables,
-        );
     }
 
     /** Called by the extension when the user runs the "ask about selection" command. */
@@ -326,7 +385,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
 
         const events: JavelinEvents = {
             onPhase: (phase, label) => this._view?.webview.postMessage({ command: 'javelinPhase', phase, label }),
-            onPlan: (plan) => this._view?.webview.postMessage({ command: 'javelinPlan', plan }),
+            onPlan: (plan, steps) => this._view?.webview.postMessage({ command: 'javelinPlan', plan, steps }),
             onHypothesis: (hypothesis) => this._view?.webview.postMessage({ command: 'javelinHypothesis', hypothesis }),
             onThinkingDelta: (delta) => this._view?.webview.postMessage({ command: 'agentDelta', delta }),
             onThinking: (text) => {
@@ -394,6 +453,9 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                 autonomy,
             });
 
+            // Remember the automatic pre-run checkpoint so "Revert All" has a target.
+            this._runBaseline = result.baseline ?? undefined;
+
             // Persist what Javelin learned.
             await this._context.globalState.update('javelin.memory', memory.snapshot());
 
@@ -404,6 +466,8 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                 stepCount: result.steps.length,
                 verified: result.verified,
                 hypotheses: result.hypotheses,
+                filesTouched: result.filesTouched ?? [],
+                baseline: result.baseline ?? null,
             });
         } catch (error) {
             this._view.webview.postMessage({ command: 'error', error: getErrorMessage(error) });
@@ -423,6 +487,24 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         await this.restoreCheckpoint(id);
     }
 
+    /** Public wrapper: undo everything the last run changed. */
+    public async revertAllChanges() {
+        await this.revertAll();
+    }
+
+    /** Public wrapper: keep the last run's changes. */
+    public acceptAllChanges() {
+        this.acceptAll();
+    }
+
+    /** Public wrapper: undo the last message you sent, and its file changes. */
+    public async revertToLastMessageCommand() {
+        if (!this._view) {
+            await vscode.commands.executeCommand('javelin.assistant.focus');
+        }
+        await this.revertToLastMessage();
+    }
+
     /** Stop whatever is running: Javelin, the agent, or a chat stream. */
     public stopEverything() {
         this._javelinAbort?.abort();
@@ -432,9 +514,79 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         this.resolveApproval(false, false);
     }
 
+    /**
+     * Undo the last message you sent: truncate the conversation back to it and put
+     * the files back as they were before it ran.
+     *
+     * This is the "that was the wrong request" button. It restores both sides of the
+     * state — what was said and what was changed — because undoing one without the
+     * other leaves the conversation describing files that no longer match.
+     *
+     * The message itself is kept, so you can edit your wording and resend rather than
+     * retyping the whole request.
+     */
+    private async revertToLastMessage() {
+        const mark = this._messageMarks[this._messageMarks.length - 1];
+        if (!mark) {
+            vscode.window.showInformationMessage('Javelin AI: no message to revert to yet.');
+            return;
+        }
+
+        const dirty = vscode.workspace.textDocuments.filter((d) => d.isDirty && !d.isUntitled);
+        if (dirty.length) {
+            const go = await vscode.window.showWarningMessage(
+                `Reverting will discard unsaved changes in ${dirty.length} open file(s). Continue?`,
+                { modal: true },
+                'Revert message',
+            );
+            if (go !== 'Revert message') {
+                return;
+            }
+        }
+
+        let revertedFiles: string[] = [];
+        if (mark.checkpointId) {
+            const workspace = this.getWorkspace();
+            if (workspace) {
+                try {
+                    revertedFiles = await workspace.restore(mark.checkpointId);
+                } catch (error) {
+                    vscode.window.showErrorMessage(
+                        `Javelin AI: restored the conversation but could not revert files — ${getErrorMessage(error)}`,
+                    );
+                }
+            }
+        }
+
+        // Truncate everything after the target message, keeping the message itself.
+        this._conversationHistory = this._conversationHistory.slice(0, mark.entryIndex + 1);
+        this._messageMarks = this._messageMarks.filter((m) => m.entryIndex <= mark.entryIndex);
+        this._runBaseline = undefined;
+        await this.saveConversation();
+        await this._context.globalState.update('messageMarks', this._messageMarks);
+
+        this._view?.webview.postMessage({
+            command: 'conversationReverted',
+            messages: this._conversationHistory,
+            files: revertedFiles,
+        });
+
+        const filesNote = revertedFiles.length
+            ? ` and reverted ${revertedFiles.length} file(s)`
+            : '';
+        vscode.window.showInformationMessage(
+            `Javelin AI: reverted to your last message${filesNote}. Edit it and send again.`,
+        );
+    }
+
     private loadConversation() {
         this._conversationHistory = this._context.globalState.get<ChatEntry[]>('conversationHistory', []);
         this._checkpoints = this._context.globalState.get<CheckpointInfo[]>('checkpoints', []);
+        // Defensive: a persisted value from an older or corrupt state must not be able
+        // to break the panel. If it is not an array, fall back to empty — an empty
+        // list of undo marks is harmless; a non-array would throw on the next push.
+        const marks = this._context.globalState.get<MessageMark[]>('messageMarks', []);
+        this._messageMarks = Array.isArray(marks) ? marks : [];
     }
 
     private async saveConversation() {
@@ -479,6 +631,11 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
 
     private clearConversation() {
         this._conversationHistory = [];
+        // The marks point into the conversation, so they are meaningless once it is
+        // cleared — leaving them would let "revert to last message" target a message
+        // that no longer exists.
+        this._messageMarks = [];
+        void this._context.globalState.update('messageMarks', []);
         void this.saveConversation();
         this._view?.webview.postMessage({ command: 'conversationCleared' });
     }
@@ -517,6 +674,74 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         }
     }
 
+    /**
+     * Undo everything the last run did, back to the automatic pre-run checkpoint.
+     *
+     * This is the "I do not trust this result" button: it does not need the agent to
+     * have cooperated, and works even if the run failed halfway through or corrupted
+     * files. When the user has unsaved edits in an open file they are asked first, so
+     * reverting cannot silently discard work done outside the agent.
+     */
+    private async revertAll() {
+        const workspace = this.getWorkspace();
+        const baseline = this._runBaseline;
+        if (!workspace || !baseline) {
+            vscode.window.showWarningMessage('Javelin AI: nothing to revert to yet — run the agent first.');
+            return;
+        }
+
+        const dirty = vscode.workspace.textDocuments.filter((d) => d.isDirty && !d.isUntitled);
+        if (dirty.length) {
+            const choice = await vscode.window.showWarningMessage(
+                `Reverting will discard unsaved changes in ${dirty.length} open file(s). Continue?`,
+                { modal: true },
+                'Revert and discard',
+            );
+            if (choice !== 'Revert and discard') {
+                return;
+            }
+        }
+
+        try {
+            const changed = await workspace.restore(baseline);
+            this._view?.webview.postMessage({ command: 'checkpointRestored', id: baseline, files: changed });
+            if (!changed.length) {
+                vscode.window.showInformationMessage('Javelin AI: nothing had changed — workspace already matches.');
+                return;
+            }
+            const pick = await vscode.window.showInformationMessage(
+                `Javelin AI: reverted ${changed.length} file(s) to before this run.`,
+                'Show files',
+            );
+            if (pick === 'Show files') {
+                const uri = vscode.Uri.joinPath(
+                    vscode.workspace.workspaceFolders![0].uri,
+                    changed[0],
+                );
+                await vscode.window.showTextDocument(uri);
+            }
+        } catch (error) {
+            vscode.window.showErrorMessage(`Javelin AI: could not revert — ${getErrorMessage(error)}`);
+        }
+    }
+
+    /**
+     * Keep the last run's changes: drop the baseline so it cannot be reverted by
+     * accident, and say so plainly rather than showing a button that silently does
+     * nothing afterwards.
+     */
+    private acceptAll() {
+        if (!this._runBaseline) {
+            vscode.window.showInformationMessage('Javelin AI: nothing to accept yet.');
+            return;
+        }
+        this._runBaseline = undefined;
+        this._view?.webview.postMessage({ command: 'changesAccepted' });
+        vscode.window.showInformationMessage(
+            'Javelin AI: changes kept. Use a checkpoint or your own version control to undo later.',
+        );
+    }
+
     private async handleMessage(
         content: string,
         mode: 'chat' | 'agent' | 'javelin',
@@ -529,6 +754,31 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
 
         const userEntry: ChatEntry = { role: 'user', content, timestamp: Date.now() };
         this._conversationHistory.push(userEntry);
+
+        // Mark this message so the user can later revert to it: remember where it
+        // sits in the conversation, and snapshot the files as they are right now.
+        // The snapshot is what makes "revert to this message" undo the message's
+        // *effects*, not just delete its text.
+        const mark = {
+            entryIndex: this._conversationHistory.length - 1,
+            label: content.length > 60 ? `${content.slice(0, 60)}…` : content,
+            timestamp: Date.now(),
+            checkpointId: undefined as string | undefined,
+        };
+        try {
+            const workspace = this.getWorkspace();
+            if (workspace) {
+                const cp = await workspace.snapshot(`Before: ${mark.label}`);
+                mark.checkpointId = cp.id;
+                this._checkpoints.push(cp);
+                void this._context.globalState.update('checkpoints', this._checkpoints);
+            }
+        } catch {
+            // No workspace (or unsnapshottable): still allow reverting the chat text.
+        }
+        this._messageMarks.push(mark);
+        void this._context.globalState.update('messageMarks', this._messageMarks);
+
         // The modal renders the user's task itself, so echoing it into the sidebar
         // would duplicate it there.
         if (!fromModal) {
@@ -916,6 +1166,36 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             padding: 2px 7px; cursor: pointer; font-size: 10px;
         }
         .cp:hover { background: var(--vscode-toolbar-hoverBackground); }
+        .task-card {
+            border: 1px solid var(--vscode-panel-border); border-radius: 5px;
+            padding: 8px 10px; margin-top: 4px; font-size: 12px;
+        }
+        .task-title {
+            font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+            opacity: 0.7; margin-bottom: 5px;
+        }
+        .task-row { display: flex; gap: 6px; align-items: flex-start; padding: 2px 0; opacity: 0.65; }
+        .task-row.active { opacity: 1; font-weight: 600; }
+        .task-row.done { opacity: 0.5; text-decoration: line-through; }
+        .task-box { flex: 0 0 auto; width: 12px; color: var(--vscode-textLink-foreground); }
+        .task-row.done .task-box { color: var(--vscode-charts-green, #89d185); }
+        .task-label { flex: 1 1 auto; }
+        .run-controls {
+            display: flex; flex-wrap: wrap; align-items: center; gap: 7px;
+            border: 1px solid var(--vscode-panel-border); border-radius: 5px;
+            padding: 7px 9px; font-size: 11px; margin-top: 4px;
+        }
+        .run-controls button {
+            border-radius: 4px; padding: 3px 9px; cursor: pointer; font-size: 11px;
+            border: 1px solid var(--vscode-panel-border); background: transparent;
+            color: var(--vscode-foreground);
+        }
+        .run-controls button.keep {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground); border-color: transparent;
+        }
+        .run-controls button.undo { color: var(--vscode-charts-red, #f48771); }
+        .run-controls button:hover { opacity: 0.88; }
         .modal-backdrop {
             display: none; position: fixed; inset: 0; z-index: 50;
             background: rgba(0,0,0,0.5); align-items: center; justify-content: center; padding: 12px;
@@ -1211,6 +1491,8 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         };
 
         let planEl = null;
+        // The parsed plan steps, kept so the checklist can be ticked off in order.
+        let taskSteps = [];
         function renderPlanPanel() {
             // The phase strip already shows progress; the plan card is separate.
         }
@@ -1231,6 +1513,86 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             el.textContent = 'Diagnosis: ' + hypothesis;
             chat.appendChild(el);
             chat.scrollTop = chat.scrollHeight;
+        }
+
+        /**
+         * The plan as a checklist of tasks.
+         *
+         * This is the "what will it do" view: each step is a row that starts pending
+         * and is ticked off as the run works through it, so progress is visible rather
+         * than inferred. Steps are matched to progress by position, since a plan step
+         * and a tool call do not share identifiers.
+         */
+        function renderTaskList(steps) {
+            const existing = document.getElementById('taskList');
+            if (existing) { existing.remove(); }
+            if (!steps || !steps.length) { return; }
+
+            taskSteps = steps.map(function (text) { return { text: text, done: false }; });
+
+            const card = document.createElement('div');
+            card.className = 'task-card';
+            card.id = 'taskList';
+            const title = document.createElement('div');
+            title.className = 'task-title';
+            title.textContent = 'Tasks';
+            card.appendChild(title);
+
+            taskSteps.forEach(function (step, i) {
+                const row = document.createElement('div');
+                row.className = 'task-row';
+                row.dataset.taskIndex = String(i);
+                const box = document.createElement('span');
+                box.className = 'task-box';
+                box.textContent = '\u25cb';
+                const label = document.createElement('span');
+                label.className = 'task-label';
+                label.textContent = (i + 1) + '. ' + step.text;
+                row.appendChild(box);
+                row.appendChild(label);
+                card.appendChild(row);
+            });
+
+            chat.appendChild(card);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        /**
+         * Tick off plan steps as real work happens.
+         *
+         * A previously-failed tool call must not advance the checklist — otherwise a
+         * retry reads as progress when nothing actually succeeded.
+         */
+        function advanceTaskList(name) {
+            if (!taskSteps.length || name === 'finish') { return; }
+            const next = taskSteps.findIndex(function (s) { return !s.done; });
+            if (next === -1) { return; }
+            taskSteps[next].done = true;
+            setTaskRowState(next, 'done');
+            // The step after the one just finished becomes the active one.
+            if (taskSteps[next + 1] && !taskSteps[next + 1].done) {
+                setTaskRowState(next + 1, 'active');
+            }
+        }
+
+        function setTaskRowState(index, state) {
+            const card = document.getElementById('taskList');
+            if (!card) { return; }
+            const row = card.querySelector('[data-task-index="' + index + '"]');
+            if (!row) { return; }
+            row.classList.remove('active', 'done');
+            row.classList.add(state);
+            row.querySelector('.task-box').textContent = state === 'done' ? '\u2713' : (state === 'active' ? '\u25b8' : '\u25cb');
+        }
+
+        /** Mark every remaining task done — the run finished, so nothing is pending. */
+        function completeTaskList() {
+            taskSteps.forEach(function (s, i) {
+                if (!s.done) {
+                    s.done = true;
+                    setTaskRowState(i, 'done');
+                }
+            });
         }
 
         function emptyText() {
@@ -1534,6 +1896,69 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             chat.insertBefore(bar, chat.firstChild);
         }
 
+        /**
+         * The keep-or-undo decision shown after a run that changed files.
+         *
+         * "Revert" is always offered because the runtime takes its own checkpoint
+         * before the run — it does not depend on the agent having been sensible.
+         */
+        function showRunControls(fileCount, status) {
+            removeRunControls();
+            const bar = document.createElement('div');
+            bar.className = 'run-controls';
+            bar.id = 'runControls';
+
+            const label = document.createElement('span');
+            label.textContent = 'This run changed ' + fileCount + ' file(s).';
+            bar.appendChild(label);
+
+            const keep = document.createElement('button');
+            keep.className = 'keep';
+            keep.textContent = '✓ Accept all';
+            keep.title = 'Keep these changes';
+            keep.addEventListener('click', function () {
+                vscode.postMessage({ command: 'acceptAll' });
+            });
+            bar.appendChild(keep);
+
+            const undo = document.createElement('button');
+            undo.className = 'undo';
+            undo.textContent = '\u21a9 Revert all';
+            undo.title = 'Undo every change this run made, back to how the workspace was before it started';
+            undo.addEventListener('click', function () {
+                vscode.postMessage({ command: 'revertAll' });
+            });
+            bar.appendChild(undo);
+
+            // Undo the request as well as its effects — removes your message and
+            // everything after it, and puts the files back as they were before it.
+            const undoMessage = document.createElement('button');
+            undoMessage.className = 'undo';
+            undoMessage.textContent = '\u21a9 Revert my last message';
+            undoMessage.title = 'Discard your last message and everything after it, and restore the files to before it ran';
+            undoMessage.addEventListener('click', function () {
+                vscode.postMessage({ command: 'revertToLastMessage' });
+            });
+            bar.appendChild(undoMessage);
+
+            // A failed run is exactly when you want the undo, so say it plainly.
+            if (status && status !== 'done') {
+                const warn = document.createElement('span');
+                warn.textContent = status === 'aborted'
+                    ? ' (run was stopped part-way — reverting is recommended)'
+                    : ' (run failed — reverting is recommended)';
+                warn.style.opacity = '0.8';
+                bar.appendChild(warn);
+            }
+
+            chat.appendChild(bar);
+        }
+
+        function removeRunControls() {
+            const existing = document.getElementById('runControls');
+            if (existing) { existing.remove(); }
+        }
+
         function showApproval(request) {
             pendingApprovalId = request.id;
             approvalRemember.checked = false;
@@ -1666,6 +2091,8 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     break;
                 case 'agentStart':
                     setBusy(true);
+                    // A new run supersedes the previous plan's checklist.
+                    taskSteps = [];
                     if (mode === 'javelin') {
                         setPhase('understand', 'starting');
                     } else {
@@ -1678,6 +2105,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     break;
                 case 'javelinPlan':
                     renderPlan(message.plan);
+                    renderTaskList(message.steps || []);
                     break;
                 case 'javelinHypothesis':
                     renderHypothesis(message.hypothesis);
@@ -1709,6 +2137,8 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     break;
                 case 'toolResult':
                     completeStep(message.id, message.ok, message.output, message.diff);
+                    // Only successful work advances the checklist — a retry is not progress.
+                    if (message.ok) { advanceTaskList(message.name); }
                     if (agentModalBusy) { agentCompleteStep(message.id, message.ok, message.output, message.diff); }
                     break;
                 case 'checkpoints':
@@ -1728,6 +2158,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     break;
                 case 'agentEnd':
                     clearPhase();
+                    completeTaskList();
                     if (agentModalBusy) {
                         agentModalSummary.textContent = message.summary + ' — ' + message.stepCount + ' step(s)';
                     }
@@ -1744,6 +2175,31 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                         + '</span><span>' + escapeHtml(message.summary) + ' — ' + message.stepCount
                         + ' step(s)' + diagNote + '</span>' + verifiedBadge;
                     chat.appendChild(summary);
+                    // Offer the decision whenever the run changed something. Revert is
+                    // always available because the baseline is taken automatically.
+                    var touched = message.filesTouched || [];
+                    if (message.baseline && touched.length) {
+                        showRunControls(touched.length, message.status);
+                    }
+                    chat.scrollTop = chat.scrollHeight;
+                    break;
+                case 'changesAccepted':
+                    removeRunControls();
+                    break;
+                case 'conversationReverted':
+                    removeRunControls();
+                    // Rebuild the transcript from the truncated history the host sent,
+                    // so the chat matches what was actually kept.
+                    resetChat();
+                    chat.innerHTML = '';
+                    (message.messages || []).forEach(function (m) { addMessage(m.role, m.content); });
+                    taskSteps = [];
+                    var revertNote = document.createElement('div');
+                    revertNote.className = 'phase';
+                    revertNote.textContent = '\u21a9 Reverted to your last message'
+                        + ((message.files || []).length ? ' \u2014 ' + message.files.length + ' file(s) restored.' : '.')
+                        + ' Edit it and send again.';
+                    chat.appendChild(revertNote);
                     chat.scrollTop = chat.scrollHeight;
                     break;
                 case 'agentDone':

@@ -22,6 +22,7 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
   const [busy, setBusy] = useState(false)
   const [phase, setPhase] = useState(null)
   const [plan, setPlan] = useState(null)
+  const [planSteps, setPlanSteps] = useState([])
   const [hypotheses, setHypotheses] = useState([])
   const [steps, setSteps] = useState([])
   const [checkpoints, setCheckpoints] = useState([])
@@ -71,6 +72,7 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
       setSteps([])
       setCheckpoints([])
       setPlan(null)
+      setPlanSteps([])
       setHypotheses([])
       setThinking('')
       setBusy(true)
@@ -95,6 +97,8 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
                 break
               case 'plan':
                 setPlan(evt.plan)
+                // The plan parsed into task steps, so the UI can tick them off.
+                setPlanSteps(evt.steps ?? [])
                 break
               case 'hypothesis':
                 setHypotheses((prev) => [...prev, evt.hypothesis])
@@ -122,6 +126,17 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
                   record.diff = evt.diff
                 }
                 setSteps([...liveSteps])
+                // Tick the next pending task off — only on success, so a retry of a
+                // failed step never reads as progress.
+                if (evt.ok && evt.name !== 'finish') {
+                  setPlanSteps((prev) => {
+                    const next = prev.findIndex((s) => !s.done)
+                    if (next === -1) return prev
+                    const copy = prev.slice()
+                    copy[next] = { ...copy[next], done: true }
+                    return copy
+                  })
+                }
                 if (evt.diff) {
                   onFileChanged?.(evt)
                 }
@@ -210,6 +225,7 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
     phase,
     phaseLabel,
     plan,
+    planSteps,
     hypotheses,
     steps,
     checkpoints,

@@ -1,3 +1,5 @@
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 import * as vscode from 'vscode';
 import { JavelinPanel } from './JavelinPanel';
 import { setApiKey } from './aiService';
@@ -158,6 +160,27 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.commands.registerCommand('javelin.stopAgent', () => {
             provider.stopEverything();
+        }),
+    );
+
+    // Undo everything the last run changed — back to the automatic pre-run checkpoint.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('javelin.revertAllChanges', async () => {
+            await provider.revertAllChanges();
+        }),
+    );
+
+    // Keep the last run's changes.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('javelin.acceptAllChanges', () => {
+            provider.acceptAllChanges();
+        }),
+    );
+
+    // Undo the last message you sent: truncate the chat to it and restore the files.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('javelin.revertToLastMessage', async () => {
+            await provider.revertToLastMessageCommand();
         }),
     );
 

@@ -22,6 +22,7 @@ import {
   verificationPolicy,
   classifyCommandResult,
   extractPlan,
+  extractPlanSteps,
   extractHypothesis,
   summariseRun,
 } from './brain.js'
@@ -112,6 +113,8 @@ async function runLoop(opts) {
     checkpoints: [],
     filesTouched: new Set(),
     alwaysAllow: new Set(),
+    /** Id of the automatic pre-run checkpoint — the guaranteed revert target. */
+    baseline: null,
   }
 
   const transcript = []
@@ -133,6 +136,29 @@ async function runLoop(opts) {
   // Record the plan text and note progress while streaming.
   emit(onEvent, { type: 'phase', phase: state.phase, label: PHASE_LABEL[state.phase] })
   emit(onEvent, { type: 'run_started', task })
+
+  // AUTOMATIC BASELINE.
+  //
+  // The agent is *told* to checkpoint before risky work, but an agent that
+  // corrupts a file is exactly the agent that skipped that step. So the safety net
+  // is taken here, before the first tool call — the agent cannot forget it, decline
+  // it, or run before it exists. This is what makes "revert everything" always
+  // available, even after a run that went badly wrong.
+  try {
+    const baseline = workspace.snapshot(
+      `Start of run — ${task.slice(0, 48)}${task.length > 48 ? '…' : ''}`,
+    )
+    run.checkpoints.push(baseline)
+    run.baseline = baseline.id
+    emit(onEvent, { type: 'checkpoint', checkpoint: baseline })
+  } catch (error) {
+    // A workspace we cannot snapshot is a workspace we cannot safely edit.
+    run.status = 'failed'
+    run.summary =
+      `Could not take a safety checkpoint before starting (${error.message}). ` +
+      `Nothing was changed — refusing to edit files we cannot revert.`
+    return finalise()
+  }
 
   if (signal?.aborted) {
     return finishAborted()
@@ -199,7 +225,9 @@ async function runLoop(opts) {
           if (plan) {
             state.plan = plan
             state.planStated = true
-            emit(onEvent, { type: 'plan', plan })
+            // Emit both the raw plan and it parsed into task steps, so the UI can
+            // render a checklist it can tick off as the run progresses.
+            emit(onEvent, { type: 'plan', plan, steps: extractPlanSteps(plan) })
           }
         }
 
@@ -383,10 +411,8 @@ async function runLoop(opts) {
 
         if (RISK.WRITE === tools.get(call.name)?.risk && outcome.ok) {
           state.hasEdited = true
-          if (!run.checkpoints.length && call.args?.path) {
-            // Opportunistic safety checkpoint on first edit if the agent didn't make one.
-            // (The agent is instructed to; this is a backstop.)
-          }
+          // No safety checkpoint needed here: the runtime already took an automatic
+          // baseline before the run started, so "revert everything" is always possible.
         }
 
         if (call.name === 'run_command') {
@@ -525,6 +551,7 @@ async function runLoop(opts) {
       checkpoints: run.checkpoints,
       filesTouched: [...run.filesTouched],
       hypotheses,
+      baseline: run.baseline,
       memory: memory.snapshot(),
       // Included so an auto-capture hook has the run's own description and plan.
       task,
@@ -594,6 +621,11 @@ function safePreview(workspace, call) {
 function approvalKeyFor(call) {
   if (call.name === 'run_command') {
     return `run_command:${String(call.args?.command ?? '').trim()}`
+  }
+  // Deliberately per-path: "always allow" on deleting one file must never become
+  // standing permission to delete a different file.
+  if (call.name === 'delete_file') {
+    return `delete_file:${String(call.args?.path ?? '')}`
   }
   return call.name
 }

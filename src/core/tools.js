@@ -33,7 +33,7 @@ export const RISK = {
 export const AUTONOMY = {
   /** Ask before every mutation and every non-allowlisted command. (default) */
   ASK: 'ask',
-  /** Run edits and deletes freely; still confirm unusual commands. */
+  /** Run code edits freely; still confirm file deletions and unusual commands. */
   AUTO_EDIT: 'auto-edit',
   /** Do everything unattended — edits, deletes and any command that isn't catastrophic. */
   FULL: 'full',
@@ -63,7 +63,14 @@ export function needsApproval(registry, name, args, autonomy = AUTONOMY.ASK) {
     return false
   }
   if (autonomy === AUTONOMY.AUTO_EDIT) {
-    // Trust edits and deletes; still confirm an unusual (non-allowlisted) command.
+    // Destructive work is NOT covered by auto-edit. That setting means "trust me on
+    // code edits"; deleting a file is a different risk class, so it still asks.
+    // Without this, the only gate on delete_file would be a setting the user chose
+    // for text changes.
+    if (tool?.risk === RISK.DESTRUCTIVE) {
+      return true
+    }
+    // Trust edits; still confirm an unusual (non-allowlisted) command.
     if (tool?.risk === RISK.EXECUTE) {
       return !isSafeCommand(args?.command ?? '')
     }
@@ -242,6 +249,39 @@ export function createStandardToolset() {
         output: entries.length
           ? entries.map((e) => (e.type === 'dir' ? `${e.path}/` : e.path)).join('\n')
           : '(empty — no files at this path)',
+      }
+    },
+  })
+
+  registry.register({
+    name: 'get_tree',
+    description:
+      'Show the whole project layout as a nested tree — every folder and file, to a depth limit. ' +
+      'Use this FIRST to understand how the project is organised, then read the files that matter.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Optional subfolder to root the tree at.' },
+        depth: { type: 'integer', description: 'How many levels deep to walk. Default 6.' },
+      },
+    },
+    risk: RISK.READ,
+    autoSafe: true,
+    async execute(args, ctx) {
+      const tree = ctx.workspace.tree
+      if (typeof tree !== 'function') {
+        // A workspace that cannot build a tree still has list — degrade, do not fail.
+        const entries = ctx.workspace.list(args.path ?? '')
+        return {
+          ok: true,
+          output: entries.length
+            ? entries.map((e) => (e.type === 'dir' ? `${e.path}/` : e.path)).join('\n')
+            : '(empty — no files at this path)',
+        }
+      }
+      return {
+        ok: true,
+        output: tree.call(ctx.workspace, args.path ?? '', args.depth ?? 6),
       }
     },
   })

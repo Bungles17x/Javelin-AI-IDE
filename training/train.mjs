@@ -19,6 +19,8 @@
  *   node training/train.mjs --run training/runs/javelin-lora
  */
 
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'

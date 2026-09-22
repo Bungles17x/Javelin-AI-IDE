@@ -37,7 +37,11 @@ A web + VS Code AI coding agent built with React, TailwindCSS and Vite. Three mo
   shows you the actual diff before it is applied. You can deny, or "always allow" for the run
 - **Failure memory** — if an action fails, the agent is told *not* to repeat it and must change
   approach. Identical repeats of a failed call are blocked by the loop, not just discouraged
-- **Checkpoints** — snapshot the workspace before risky work and revert with one click
+- **Checkpoints** — a safety checkpoint is taken **automatically before every run**, so a bad run is never final. Revert with one click, or accept and keep going
+- **Accept or revert a run** — after any run that changed files you choose: **Accept all** or **Revert all**, restoring every changed file (and un-deleting removed ones) exactly as it was
+- **Revert to your last message** — discard your last request *and everything after it*, restoring the files to before it ran. Your wording returns to the input box, so a rephrase is an edit, not a retype
+- **Sees the whole project** — starts from `get_tree`, a nested view of every folder and file, instead of guessing paths one directory at a time
+- **Task checklist** — a stated plan becomes a live checklist that ticks off as real work succeeds. A retry of a failed action never reads as progress
 - **Stop button** — aborts the run mid-flight and unblocks any pending approval
 - **Verified before "done"** — the agent reports what it actually ran; `finish` carries an
   explicit `verified` flag rather than assuming success

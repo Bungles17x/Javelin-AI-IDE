@@ -192,7 +192,7 @@ function startProxy(backend, port) {
       res.end(text)
     } catch (err) {
       res.writeHead(502, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ error: { message: `proxy error: ${err.message}` }))
+      res.end(JSON.stringify({ error: { message: `proxy error: ${err.message}` }}))
     }
   })
   server.listen(port, '127.0.0.1')

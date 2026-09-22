@@ -262,10 +262,12 @@ export async function runAgent({
  * Tools that mutate the workspace or execute something need a human gate — unless
  * the run is autonomous. `AUTONOMY.FULL` trusts Javelin to run any command it is
  * not hard-blocked from (the blocked list is still enforced in executeTool);
- * `AUTONOMY.AUTO_EDIT` trusts edits and deletes but still confirms odd commands.
+ * `AUTONOMY.AUTO_EDIT` trusts code edits, but still asks before deleting a file and
+ * before an unusual command.
  */
 function requiresApproval(call, autonomy = AUTONOMY.ASK) {
   const mutates = call.name === 'write_file' || call.name === 'edit_file' || call.name === 'delete_file'
+  const deletesFile = call.name === 'delete_file'
   const runsCommand = call.name === 'run_command'
   if (!mutates && !runsCommand) {
     return false
@@ -274,14 +276,24 @@ function requiresApproval(call, autonomy = AUTONOMY.ASK) {
     return false
   }
   if (autonomy === AUTONOMY.AUTO_EDIT) {
+    // auto-edit trusts edits, not deletions. Removing a whole file stays gated
+    // unless the run is explicitly `full`.
+    if (deletesFile) {
+      return true
+    }
     return runsCommand && !isSafeCommand(call.args?.command ?? '')
   }
   return true
 }
 
-/** What an "always allow" decision for this call would cover. */
+/**
+ * What an "always allow" decision for this call would cover.
+ * Commands are keyed by the exact command and deletions by the exact path, so
+ * consent for one is never silently reused for another.
+ */
 function approvalKeyFor(call) {
   if (call.name === 'run_command') return `run_command:${(call.args?.command ?? '').trim()}`
+  if (call.name === 'delete_file') return `delete_file:${call.args?.path ?? ''}`
   return call.name
 }
 

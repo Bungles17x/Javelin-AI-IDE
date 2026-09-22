@@ -56,6 +56,21 @@
         "category": "Javelin AI"
       },
       {
+        "command": "javelin.revertAllChanges",
+        "title": "Revert All Changes (undo last run)",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.acceptAllChanges",
+        "title": "Accept All Changes (keep last run)",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.revertToLastMessage",
+        "title": "Revert to My Last Message (undo chat and files)",
+        "category": "Javelin AI"
+      },
+      {
         "command": "javelin.restoreCheckpoint",
         "title": "Restore Checkpoint…",
         "category": "Javelin AI"
@@ -175,12 +190,12 @@
             "auto-edit",
             "full"
           ],
-          "enumDescriptions": [
+            "enumDescriptions": [
             "Ask before every file change and every non-allowlisted command.",
-            "Apply edits and deletions without asking; still confirm unusual commands.",
+            "Apply edits without asking; deleting a file and unusual commands still confirm first.",
             "Do everything unattended — plan, edit, delete, run. Only catastrophic commands stay blocked."
           ],
-          "markdownDescription": "How much Javelin may do without stopping to ask. **Auto-edit** and **Full** let the agent complete a whole task (including deleting files) in one run, taking a checkpoint at the start instead of pausing at each change. Catastrophic commands (`rm -rf /`, disk formatting, etc.) are always refused.",
+          "markdownDescription": "How much Javelin may do without stopping to ask. **Auto-edit** applies code edits without prompting, but still confirms **file deletions** and unusual commands — so a delete can never happen just because you turned on fast editing. **Full** lets the agent complete a whole task end to end, including deleting files, taking a checkpoint at the start instead of pausing. Catastrophic commands (`rm -rf /`, disk formatting, etc.) are always refused.",
           "order": 4
         },
         "javelin.agentAutoApproveSafeCommands": {

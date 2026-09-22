@@ -44,6 +44,59 @@ export class VirtualWorkspace {
     return entries.sort((a, b) => a.path.localeCompare(b.path))
   }
 
+  /**
+   * The whole project as an indented tree — nested folders AND files.
+   *
+   * `list` shows one level at a time, which makes the agent guess at structure.
+   * This walks the full tree in one call so it can see how the project is actually
+   * laid out before touching anything.
+   *
+   * @param {string} [dir] subfolder to root at
+   * @param {number} [maxDepth] how deep to walk
+   */
+  tree(dir = '', maxDepth = 6) {
+    const prefix = dir && !dir.endsWith('/') ? `${dir}/` : dir
+    // Build the nested shape from the flat path -> content map.
+    const root = { dirs: new Map(), files: [] }
+    for (const path of this.files.keys()) {
+      if (!path.startsWith(prefix)) continue
+      const rest = path.slice(prefix.length)
+      if (!rest) continue
+      const parts = rest.split('/')
+      let node = root
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (!node.dirs.has(parts[i])) {
+          node.dirs.set(parts[i], { dirs: new Map(), files: [] })
+        }
+        node = node.dirs.get(parts[i])
+      }
+      node.files.push(parts[parts.length - 1])
+    }
+
+    const out = []
+    const walk = (node, depth, pad) => {
+      const dirs = [...node.dirs.keys()].sort()
+      const files = [...node.files].sort()
+      const entries = [
+        ...dirs.map((name) => ({ name, isDir: true })),
+        ...files.map((name) => ({ name, isDir: false })),
+      ]
+      entries.forEach((entry, i) => {
+        const last = i === entries.length - 1
+        out.push(`${pad}${last ? '\u2514\u2500 ' : '\u251c\u2500 '}${entry.name}${entry.isDir ? '/' : ''}`)
+        if (entry.isDir) {
+          if (depth + 1 >= maxDepth) {
+            out.push(`${pad}${last ? '   ' : '\u2502  '}\u2514\u2500 \u2026 (depth limit)`)
+          } else {
+            walk(node.dirs.get(entry.name), depth + 1, `${pad}${last ? '   ' : '\u2502  '}`)
+          }
+        }
+      })
+    }
+    walk(root, 0, '')
+    return out.length ? out.join('\n') : '(empty workspace) \u2014 no files or folders to show.'
+  }
+
   read(path, start, end) {
     if (!this.files.has(path)) {
       throw new Error(`File not found: ${path}. Use list_files to see what exists.`)

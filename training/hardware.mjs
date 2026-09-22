@@ -21,6 +21,8 @@
  * So the profiler never says "you can't". It says *which* path fits.
  */
 
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 

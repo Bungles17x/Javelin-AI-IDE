@@ -9,12 +9,14 @@
  * it the real filesystem and a real shell.
  */
 
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 import { EngineRegistry, EngineDescriptor } from './engines';
 import { JavelinMemory, MemorySnapshot, actionSignature } from './memory';
 import { createStandardToolset, RISK, AUTONOMY, Autonomy, ToolRegistry } from './tools';
 import {
     PHASE, PHASE_LABEL, buildPhaseMessages, nextPhase, verificationPolicy,
-    classifyCommandResult, extractPlan, extractHypothesis, summariseRun,
+    classifyCommandResult, extractPlan, extractPlanSteps, extractHypothesis, summariseRun,
 } from './brain';
 import { VsCodeWorkspace } from '../workspace';
 
@@ -23,7 +25,7 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 
 export interface JavelinEvents {
     onPhase?: (phase: string, label: string) => void;
-    onPlan?: (plan: string) => void;
+    onPlan?: (plan: string, steps?: string[]) => void;
     onHypothesis?: (hypothesis: string) => void;
     onThinkingDelta?: (delta: string) => void;
     onThinking?: (text: string) => void;
@@ -44,6 +46,8 @@ export interface JavelinRunResult {
     checkpoints: any[];
     filesTouched: string[];
     hypotheses: string[];
+    /** Id of the automatic pre-run checkpoint, so the caller can offer a one-click revert. */
+    baseline: string | null;
 }
 
 export async function runJavelin(opts: {
@@ -85,6 +89,8 @@ export async function runJavelin(opts: {
         steps: [] as any[],
         checkpoints: [] as any[],
         filesTouched: new Set<string>(),
+        /** Id of the automatic pre-run checkpoint — the guaranteed revert target. */
+        baseline: null as string | null,
     };
 
     const transcript: any[] = [];
@@ -99,6 +105,37 @@ export async function runJavelin(opts: {
 
     const emitPhase = () => events.onPhase?.(state.phase, PHASE_LABEL[state.phase] ?? state.phase);
     emitPhase();
+
+    // AUTOMATIC BASELINE.
+    //
+    // The agent is *told* to checkpoint before risky work, but an agent that
+    // corrupts a file is exactly the agent that skipped that step. So the safety
+    // net is taken here, by the runtime, before the first tool call — the agent
+    // cannot forget it, decline it, or run before it exists. This is what makes
+    // "revert everything" always available, even after a bad run.
+    try {
+        const baseline = await workspace.snapshot(
+            `Start of run — ${task.slice(0, 48)}${task.length > 48 ? '…' : ''}`,
+        );
+        run.checkpoints.push(baseline);
+        run.baseline = baseline.id;
+        events.onCheckpoint?.(baseline);
+    } catch (error: any) {
+        // A workspace we cannot snapshot is a workspace we cannot safely edit.
+        return {
+            status: 'failed',
+            summary:
+                `Could not take a safety checkpoint before starting (${error.message}). ` +
+                `Nothing was changed — refusing to edit files we cannot revert.`,
+            rawSummary: 'baseline checkpoint failed',
+            verified: false,
+            steps: [],
+            checkpoints: [],
+            filesTouched: [],
+            hypotheses: [],
+            baseline: null,
+        };
+    }
 
     try {
         for (let step = 0; step < maxSteps; step++) {
@@ -144,7 +181,9 @@ export async function runJavelin(opts: {
                     if (plan) {
                         state.plan = plan;
                         state.planStated = true;
-                        events.onPlan?.(plan);
+                        // Pass the parsed task steps too, so the UI can render a
+                        // checklist it ticks off as the run progresses.
+                        events.onPlan?.(plan, extractPlanSteps(plan));
                     }
                 }
                 if (state.phase === PHASE.REPAIR) {
@@ -231,9 +270,7 @@ export async function runJavelin(opts: {
                     continue;
                 }
 
-                const approvalKey = call.name === 'run_command'
-                    ? `run_command:${String(call.args?.command ?? '').trim()}`
-                    : call.name;
+                const approvalKey = approvalKeyFor(call);
                 const needsApproval =
                     tools.approvalNeeded(call.name, call.args, autonomy) && !alwaysAllow.has(approvalKey);
 
@@ -376,6 +413,7 @@ export async function runJavelin(opts: {
             checkpoints: run.checkpoints,
             filesTouched: [...run.filesTouched],
             hypotheses,
+            baseline: run.baseline,
         };
     }
 
@@ -385,6 +423,24 @@ export async function runJavelin(opts: {
         state.phase = PHASE.CONCLUDE;
         return finalise();
     }
+}
+
+/**
+ * What an "always allow" decision actually covers for a given call.
+ *
+ * Commands are keyed by the exact command and file deletions by the exact path,
+ * so consent given for one is never silently reused for another. Tool-level keys
+ * (write_file / create_checkpoint) are deliberately broad because "always allow
+ * editing" is a reasonable blanket choice; "always allow deleting anything" is not.
+ */
+function approvalKeyFor(call: any): string {
+    if (call.name === 'run_command') {
+        return `run_command:${String(call.args?.command ?? '').trim()}`;
+    }
+    if (call.name === 'delete_file') {
+        return `delete_file:${String(call.args?.path ?? '')}`;
+    }
+    return call.name;
 }
 
 async function executeTool(

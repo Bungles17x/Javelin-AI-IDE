@@ -6,6 +6,8 @@
  * and needs no key; cloud providers are opt-in.
  */
 
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 export interface ProviderModel {
     id: string;
     label: string;

@@ -4,7 +4,7 @@ import { Textarea } from './components/Textarea'
 import { Markdown } from './components/Markdown'
 import { SettingsDialog } from './components/SettingsDialog'
 import { ApprovalDialog } from './components/ApprovalDialog'
-import { AgentPhase, AgentTimeline, CheckpointBar } from './components/AgentTimeline'
+import { AgentPhase, AgentTimeline, CheckpointBar, RunControls, TaskList } from './components/AgentTimeline'
 import {
   PhaseRail, PlanCard, HypothesisList, JavelinSteps, JavelinResult, JavelinDiagnostics,
 } from './components/JavelinPanel'
@@ -92,9 +92,15 @@ function App() {
   const [approval, setApproval] = useState(null)
   const [runResult, setRunResult] = useState(null)
   const [dirty, setDirty] = useState(false)
+  // The last run's automatic checkpoint id, and whether a keep/undo decision is pending.
+  const [runBaseline, setRunBaseline] = useState(null)
+  const [pendingDecision, setPendingDecision] = useState(null)
 
   const abortRef = useRef(null)
   const workspaceRef = useRef(new VirtualWorkspace(workspaceFiles))
+  // One entry per user message: where it sits in the transcript and the checkpoint
+  // taken just before it ran. Reverting a message needs both.
+  const messageMarks = useRef([])
   const approvalResolver = useRef(null)
   const bottomRef = useRef(null)
   const textareaRef = useRef(null)
@@ -239,6 +245,9 @@ function App() {
     setStatusText('Starting…')
     setIsStreaming(true)
     setDirty(false)
+    // A new run supersedes the previous keep/undo offer.
+    setPendingDecision(null)
+    setRunBaseline(null)
 
     const controller = new AbortController()
     abortRef.current = controller
@@ -323,6 +332,24 @@ function App() {
       })
 
       setRunResult(result)
+      // Record where this message sits and which checkpoint undoes it, so the user can
+      // revert to it later. The runtime's automatic baseline is exactly that point.
+      const lastUser = messages.reduce((acc, m, i) => (m.role === 'user' ? i : acc), -1)
+      if (lastUser !== -1) {
+        messageMarks.current.push({
+          index: lastUser,
+          checkpointId: result.baseline ?? null,
+          ts: Date.now(),
+        })
+      }
+      // Offer the keep-or-undo decision when the run actually changed something.
+      const touched = result.filesTouched ?? []
+      setRunBaseline(result.baseline ?? null)
+      setPendingDecision(
+        result.baseline && touched.length
+          ? { fileCount: touched.length, status: result.status }
+          : null,
+      )
       setMessages((prev) => [
         ...prev,
         {
@@ -385,6 +412,71 @@ function App() {
       setError(err.message)
     }
   }, [setMessages, setWorkspaceFiles])
+
+  /**
+   * Undo everything the last run changed, back to the automatic pre-run checkpoint.
+   * Always available after a run that touched files, so a bad run is never final.
+   */
+  const revertAll = useCallback(() => {
+    if (!runBaseline) return
+    try {
+      const changed = workspaceRef.current.restore(runBaseline)
+      setWorkspaceFiles(workspaceRef.current.toJSON())
+      setMessages((prev) => [
+        ...prev,
+        { role: 'system', content: `↩️ Reverted this run — ${changed.length} file(s) restored.`, ts: Date.now() },
+      ])
+      setPendingDecision(null)
+      setRunBaseline(null)
+      setDirty(false)
+    } catch (err) {
+      setError(err.message)
+    }
+  }, [runBaseline, setMessages, setWorkspaceFiles])
+
+  /** Keep the last run's changes and retire the revert offer. */
+  const acceptAll = useCallback(() => {
+    setPendingDecision(null)
+    setRunBaseline(null)
+    setMessages((prev) => [
+      ...prev,
+      { role: 'system', content: '✓ Changes kept. Export them to disk, or use a checkpoint to undo later.', ts: Date.now() },
+    ])
+  }, [setMessages])
+
+  /**
+   * Undo the last message you sent: drop it and everything after it, and restore the
+   * files to before it ran. The message text goes back in the box so it can be edited
+   * and resent rather than retyped.
+   */
+  const revertToLastMessage = useCallback(() => {
+    let lastUser = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        lastUser = i
+        break
+      }
+    }
+    if (lastUser === -1) return
+
+    const text = messages[lastUser].content
+    // The checkpoint taken just before this message, if the run made one.
+    const mark = messageMarks.current[messageMarks.current.length - 1]
+    if (mark?.checkpointId) {
+      try {
+        workspaceRef.current.restore(mark.checkpointId)
+        setWorkspaceFiles(workspaceRef.current.toJSON())
+      } catch (err) {
+        setError(err.message)
+      }
+    }
+    setMessages((prev) => prev.slice(0, lastUser))
+    messageMarks.current = messageMarks.current.filter((m) => m.index < lastUser)
+    setPendingDecision(null)
+    setRunBaseline(null)
+    // Put the text back in the box so it can be edited and resent, not retyped.
+    setInput(text)
+  }, [messages, setError, setMessages, setWorkspaceFiles])
 
   /** Import real files into the agent's virtual workspace. */
   const importFiles = async (fileList) => {
@@ -598,6 +690,27 @@ function App() {
             <CheckpointBar checkpoints={checkpoints} onRestore={restoreCheckpoint} />
           )}
 
+          {pendingDecision && (
+            <RunControls
+              fileCount={pendingDecision.fileCount}
+              status={pendingDecision.status}
+              onAccept={acceptAll}
+              onRevert={revertAll}
+              onRevertMessage={revertToLastMessage}
+            />
+          )}
+
+          {/* Always offer message-undo after a run, even if nothing changed. */}
+          {!pendingDecision && runResult && (
+            <RunControls
+              fileCount={0}
+              status={runResult.status}
+              onAccept={acceptAll}
+              onRevert={revertAll}
+              onRevertMessage={revertToLastMessage}
+            />
+          )}
+
           {isStreaming && mode === 'agent' && <AgentPhase phase={phase} status={statusText} />}
 
           {/* Javelin Core: its own reasoning lifecycle, memory and self-correction */}
@@ -610,6 +723,7 @@ function App() {
                 onRefresh={javelin.refreshDiagnostics}
               />
               <PlanCard plan={javelin.plan} />
+              <TaskList steps={javelin.planSteps} />
               <HypothesisList hypotheses={javelin.hypotheses} />
               {javelin.busy && javelin.thinking && (
                 <div className="rounded-lg border bg-card/60 px-3 py-2 text-xs text-muted-foreground">

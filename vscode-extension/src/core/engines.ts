@@ -5,6 +5,8 @@
  * supply the raw language ability and can be swapped, chained, or degraded.
  */
 
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 import { streamCompletion } from '../providers';
 
 export const CAPABILITY = {

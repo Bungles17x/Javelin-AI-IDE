@@ -89,10 +89,13 @@ export function createJavelin(opts = {}) {
       onCaptured,
     }) {
       // Index the project once per run so the reasoner is grounded in reality.
+      // snapshotFiles may be async (the VS Code adapter reads from disk), so the
+      // result is awaited — passing a Promise here would index nothing and leave
+      // the agent planning against an empty project.
       if (workspace && typeof workspace.toJSON === 'function') {
         memory.indexProject(workspace.toJSON())
       } else if (workspace && typeof workspace.snapshotFiles === 'function') {
-        memory.indexProject(workspace.snapshotFiles())
+        memory.indexProject(await workspace.snapshotFiles())
       }
 
       const controller = new AbortController()

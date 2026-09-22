@@ -22,7 +22,8 @@
  * repairs are recorded as preference pairs (rejected) rather than as SFT targets,
  * so we never train on a wrong answer.
  */
-
+//o TODO: add a fifth lesson type: HONESTY. The runtime emits events when the model tries to claim success without verification, or tries to repeat a failed action. Those events are the *lesson*, and we can export them as SFT examples of what the model should say instead.
+//y Optional: the exporter can also produce preference pairs for the model to learn what *not* to do. For example, a failed edit followed by a successful different edit is a preference pair: "don't do the first one, do the second one". This is useful for training models that can learn from their mistakes.
 import { SOURCE, SKILL, JDF_VERSION, recordId } from './format.js'
 
 const WRITE_TOOLS = new Set(['edit_file', 'write_file'])

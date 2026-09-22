@@ -9,6 +9,8 @@
  *  - Paths are validated to stay inside the workspace root.
  */
 
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 import * as vscode from 'vscode';
 import * as path from 'path';
 
@@ -47,6 +49,15 @@ export const DEFAULT_LIVE_EDIT: LiveEditOptions = {
     animate: true,
     stepDelayMs: 24,
 };
+
+/**
+ * Directories never walked or listed. These are build output, dependencies or
+ * VCS internals — large, generated, and irrelevant to editing the user's code.
+ */
+export const SKIP_DIRS = new Set([
+    'node_modules', '.git', 'out', 'dist', 'build', '.next',
+    '__pycache__', '.venv', 'venv', '.idea', '.vscode-test', 'coverage',
+]);
 
 export class VsCodeWorkspace {
     private checkpoints: {
@@ -103,15 +114,83 @@ export class VsCodeWorkspace {
             return `(could not read directory: ${dir || '.'})`;
         }
 
-        const skip = new Set(['node_modules', '.git', 'out', 'dist', '.next', '__pycache__', '.venv']);
         const lines = entries
-            .filter(([name]) => !skip.has(name))
+            .filter(([name]) => !SKIP_DIRS.has(name))
             .slice(0, 300)
             .map(([name, type]) => {
                 const childPath = dir ? `${dir}/${name}` : name;
                 return type === vscode.FileType.Directory ? `${childPath}/` : childPath;
             });
         return lines.length ? lines.join('\n') : '(empty)';
+    }
+
+    /**
+     * The whole project as an indented tree — folders AND files, nested.
+     *
+     * `list` shows one directory at a time, which forces the agent to guess at
+     * structure and repeatedly call list on paths it has not seen. This walks the
+     * tree instead, so a single call gives an accurate, complete picture of how the
+     * project is laid out: which folders exist, what is inside them, and how deep.
+     *
+     * Depth and entry count are capped so a huge repository cannot flood the model's
+     * context; when a cap is hit the output says so rather than truncating silently.
+     */
+    async tree(dir = '', maxDepth = 4, maxEntries = 400): Promise<string> {
+        const out: string[] = [];
+        let truncated = false;
+
+        const walk = async (rel: string, depth: number, prefix: string): Promise<void> => {
+            if (out.length >= maxEntries) {
+                truncated = true;
+                return;
+            }
+            let entries: [string, vscode.FileType][];
+            try {
+                entries = await vscode.workspace.fs.readDirectory(rel ? this.uri(rel) : this.root);
+            } catch {
+                return;
+            }
+
+            // Folders first, then files, each alphabetical — a stable, readable order.
+            const visible = entries.filter(([name]) => !SKIP_DIRS.has(name));
+            visible.sort((a, b) => {
+                const aDir = a[1] === vscode.FileType.Directory;
+                const bDir = b[1] === vscode.FileType.Directory;
+                if (aDir !== bDir) {
+                    return aDir ? -1 : 1;
+                }
+                return a[0].localeCompare(b[0]);
+            });
+
+            for (let i = 0; i < visible.length; i++) {
+                if (out.length >= maxEntries) {
+                    truncated = true;
+                    return;
+                }
+                const [name, type] = visible[i];
+                const isDir = type === vscode.FileType.Directory;
+                const childRel = rel ? `${rel}/${name}` : name;
+                const isLast = i === visible.length - 1;
+                out.push(`${prefix}${isLast ? '└─ ' : '├─ '}${name}${isDir ? '/' : ''}`);
+
+                if (isDir) {
+                    if (depth + 1 >= maxDepth) {
+                        out.push(`${prefix}${isLast ? '   ' : '│  '}└─ … (depth limit)`);
+                    } else {
+                        await walk(childRel, depth + 1, `${prefix}${isLast ? '   ' : '│  '}`);
+                    }
+                }
+            }
+        };
+
+        await walk(dir, 0, '');
+        if (!out.length) {
+            return '(empty workspace) — no files or folders to show.';
+        }
+        const body = out.join('\n');
+        return truncated
+            ? `${body}\n… [tree truncated at ${maxEntries} entries — use list_files on a subfolder to go deeper]`
+            : body;
     }
 
     async read(relPath: string, start?: number, end?: number): Promise<string> {

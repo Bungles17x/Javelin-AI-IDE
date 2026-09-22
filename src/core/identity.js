@@ -64,7 +64,7 @@ export const MODEL_PRINCIPLES = [
   {
     id: 'investigate-first',
     text:
-      'INVESTIGATE BEFORE ACTING. Establish what is actually true about the code before changing it. Never assume a file\'s contents or that a path exists.',
+      'INVESTIGATE BEFORE ACTING. Start with the project tree (get_tree) to see every folder and file, then read what matters before changing it. Never assume a file\'s contents or that a path exists.',
   },
   {
     id: 'read-before-write',

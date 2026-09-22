@@ -6,6 +6,8 @@
  * makes self-correction real: a failed action is never repeated verbatim.
  */
 
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 export function actionSignature(name: string, args: any): string {
     const a = args ?? {};
     switch (name) {

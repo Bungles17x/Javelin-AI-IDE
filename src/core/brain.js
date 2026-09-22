@@ -20,6 +20,8 @@
  *      prevents the classic agent failure mode of blindly flailing at a symptom.
  */
 
+//! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
+
 import { RISK } from './tools.js'
 
 export const PHASE = {
@@ -217,6 +219,28 @@ export function extractPlan(text) {
     return numbered.slice(0, 8).join('\n')
   }
   return null
+}
+
+/**
+ * Parse a stated plan into individual task steps, in order.
+ *
+ * `extractPlan` returns one blob of text, which can only be displayed. Splitting the
+ * plan into steps lets the UI show a real checklist and tick steps off as the run
+ * progresses — so "what will it do" and "what has it done" are the same view.
+ */
+export function extractPlanSteps(text) {
+  if (!text) {
+    return []
+  }
+  const steps = []
+  for (const raw of text.split('\n')) {
+    const match = raw.match(/^\s*(?:\d+[.)]|[-*\u2022])\s+(\S.*)$/)
+    if (!match) continue
+    // Strip an optional bold wrapper so the text reads as a task, not markdown source.
+    const step = match[1].replace(/\*\*/g, '').trim()
+    if (step) steps.push(step)
+  }
+  return steps.slice(0, 12)
 }
 
 /**
