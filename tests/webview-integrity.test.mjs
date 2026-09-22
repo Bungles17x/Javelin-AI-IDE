@@ -99,5 +99,32 @@ console.log('\n5. The script can survive a missing element rather than dying')
     /if\s*\(\s*existing\s*\)\s*\{\s*existing\.remove\(\)/.test(html))
 }
 
+console.log('\n6. Inline style assignments are avoided (the webview CSP blocks them)')
+{
+  // The webview CSP is nonce-based. The CSP spec says 'unsafe-inline' is IGNORED when
+  // a nonce is present, so `el.style.x = ...` on a styled element is dropped by the
+  // browser. Runtime state must be a class instead.
+  const styleAssignments = [...html.matchAll(/\.style\.[a-zA-Z]+\s*=/g)].map((m) => m[0])
+  check('no inline style assignments remain in the panel script',
+    styleAssignments.length === 0, styleAssignments.join(', '))
+
+  // The classes the script toggles must actually be defined in the stylesheet.
+  for (const cls of ['phase-visible', 'verified-badge', 'notice-bar', 'hidden', 'dim']) {
+    check(`.${cls} is defined in the panel CSS`, html.includes(`.${cls}`))
+  }
+}
+
+console.log('\n7. The template literal was not broken by an unescaped backtick')
+{
+  // A backtick inside the webview template literal terminates the string and breaks
+  // the whole script — producing "no buttons work". The extraction above would have
+  // produced a truncated file if that had happened.
+  check('the extracted HTML is complete', html.includes('</html>'),
+    'no closing </html> — the template literal is probably broken')
+  check('the script block closes', html.includes('</script>'),
+    'no closing </script>')
+  check('the CSS block closes', html.includes('</style>'), 'no closing </style>')
+}
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}\n`)
 process.exit(failures === 0 ? 0 : 1)

@@ -1166,6 +1166,20 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             padding: 2px 7px; cursor: pointer; font-size: 10px;
         }
         .cp:hover { background: var(--vscode-toolbar-hoverBackground); }
+        /*
+         * Shared state classes. The webview CSP allows only nonce'd styles, so an
+         * inline style assignment (element.style.x = ...) is silently dropped by the
+         * browser. Anything the script switches at runtime must be a class here.
+         */
+        .hidden { display: none !important; }
+        .dim { opacity: 0.8; }
+        .phase-visible { display: flex !important; }
+        .verified-badge { color: var(--vscode-charts-green, #89d185); }
+        .notice-bar {
+            border: none; border-radius: 4px; padding: 5px 9px; font-size: 11px;
+            background: var(--vscode-badge-background);
+            color: var(--vscode-badge-foreground);
+        }
         .task-card {
             border: 1px solid var(--vscode-panel-border); border-radius: 5px;
             padding: 8px 10px; margin-top: 4px; font-size: 12px;
@@ -1772,7 +1786,9 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             const el = ensurePhase();
             const label = PHASE_LABEL[phase] || 'Working';
             el.querySelector('#phaseText').textContent = status ? (label + ' — ' + status) : label;
-            el.style.display = 'flex';
+            // Class rather than an inline style: the webview CSP allows only nonce'd
+            // styles, and a direct style assignment is blocked outright.
+            el.classList.add('phase-visible');
             chat.scrollTop = chat.scrollHeight;
         }
 
@@ -1944,10 +1960,10 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             // A failed run is exactly when you want the undo, so say it plainly.
             if (status && status !== 'done') {
                 const warn = document.createElement('span');
+                warn.className = 'dim';
                 warn.textContent = status === 'aborted'
                     ? ' (run was stopped part-way — reverting is recommended)'
                     : ' (run failed — reverting is recommended)';
-                warn.style.opacity = '0.8';
                 bar.appendChild(warn);
             }
 
@@ -2146,10 +2162,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     break;
                 case 'checkpointRestored':
                     var note = document.createElement('div');
-                    note.className = 'error';
-                    note.style.background = 'var(--vscode-badge-background)';
-                    note.style.color = 'var(--vscode-badge-foreground)';
-                    note.style.border = 'none';
+                    note.className = 'notice-bar';
                     note.textContent = 'Reverted ' + (message.files || []).length + ' file(s).';
                     chat.insertBefore(note, chat.firstChild);
                     break;
@@ -2163,10 +2176,9 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                         agentModalSummary.textContent = message.summary + ' — ' + message.stepCount + ' step(s)';
                     }
                     var summary = document.createElement('div');
-                    summary.className = 'phase';
-                    summary.style.display = 'flex';
+                    summary.className = 'phase phase-visible';
                     var verifiedBadge = message.verified
-                        ? ' <b style="color:var(--vscode-charts-green,#89d185)">✓ verified</b>'
+                        ? ' <b class="verified-badge">✓ verified</b>'
                         : '';
                     var diagNote = (message.hypotheses && message.hypotheses.length)
                         ? ' · ' + message.hypotheses.length + ' diagnosis(es)'
@@ -2246,7 +2258,8 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             agentModalRun.disabled = busy;
             agentTaskInput.disabled = busy;
             agentModalRun.textContent = busy ? 'Running…' : 'Run task';
-            agentModalStop.style.display = busy ? 'inline-block' : 'none';
+            // Toggle a class — the webview CSP refuses inline style assignments.
+            agentModalStop.classList.toggle('hidden', !busy);
             agentModalStatus.textContent = busy ? 'Working…' : 'Idle';
         }
 
