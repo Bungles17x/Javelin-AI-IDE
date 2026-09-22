@@ -44,7 +44,9 @@ function extractWebviewHtml() {
     if (ch === '}' && depth > 0) { depth--; out += '}'; continue }
     out += ch
   }
-  return out.replace(/\$\{[^}]*\}/g, 'STUB')
+  // Unescape the template literal so this is the markup a browser would receive,
+  // then substitute the interpolated nonce with a fixed value.
+  return out.replace(/\$\{[^}]*\}/g, 'NONCE').replace(/\\`/g, '`').replace(/\\\$/g, '$')
 }
 
 const html = extractWebviewHtml()
@@ -124,6 +126,32 @@ console.log('\n7. The template literal was not broken by an unescaped backtick')
   check('the script block closes', html.includes('</script>'),
     'no closing </script>')
   check('the CSS block closes', html.includes('</style>'), 'no closing </style>')
+}
+
+console.log('\n8. The panel script is VALID JAVASCRIPT (this is what broke every button)')
+{
+  // A single malformed regex in the emitted script is a SYNTAX error. The browser then
+  // executes none of it: no handler is attached and every button is silently dead,
+  // while the panel still renders perfectly. That is exactly "no buttons work", and it
+  // shipped once. Parsing the emitted script is the only check that catches it.
+  const scriptTags = [...html.matchAll(/<script[^>]*>/g)]
+  check('the markup contains a script block', scriptTags.length > 0)
+
+  if (scriptTags.length) {
+    const start = scriptTags[scriptTags.length - 1].index + scriptTags[scriptTags.length - 1][0].length
+    const end = html.indexOf('</script>', start)
+    const js = html.slice(start, end)
+    check('the script is substantial', js.length > 5000, String(js.length))
+    let syntaxError = null
+    try {
+      // Parses the same way a browser would, without executing it.
+      new Function(js)
+    } catch (err) {
+      syntaxError = err.message
+    }
+    check('the panel script parses as valid JavaScript', syntaxError === null,
+      syntaxError || '')
+  }
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}\n`)

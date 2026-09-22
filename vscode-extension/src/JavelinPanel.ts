@@ -1167,9 +1167,9 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         }
         .cp:hover { background: var(--vscode-toolbar-hoverBackground); }
         /*
-         * Shared state classes. The webview CSP allows only nonce'd styles, so an
-         * inline style assignment (element.style.x = ...) is silently dropped by the
-         * browser. Anything the script switches at runtime must be a class here.
+         * Shared state classes. The webview CSP allows only nonce'd styles, so a direct
+         * style assignment on an element is silently dropped by the browser. Anything
+         * the script switches at runtime must be a class here.
          */
         .hidden { display: none !important; }
         .dim { opacity: 0.8; }
@@ -1180,6 +1180,22 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             background: var(--vscode-badge-background);
             color: var(--vscode-badge-foreground);
         }
+        /*
+         * Classes replacing former inline style attributes. A CSP nonce authorises
+         * nonce'd elements only — it does not cover inline style attributes, which are
+         * always refused under style-src. So these must be real rules.
+         */
+        .agent-head-right { display: flex; align-items: center; gap: 8px; }
+        .field-label {
+            font-size: 11px; color: var(--vscode-descriptionForeground);
+            display: flex; align-items: center; gap: 5px;
+        }
+        .modal-actions { display: flex; gap: 6px; }
+        .command-preview {
+            border: 1px solid var(--vscode-panel-border); border-radius: 4px;
+            padding: 8px; overflow-x: auto;
+        }
+        .approval-note { white-space: pre-wrap; font-size: 11px; }
         .task-card {
             border: 1px solid var(--vscode-panel-border); border-radius: 5px;
             padding: 8px 10px; margin-top: 4px; font-size: 12px;
@@ -1393,7 +1409,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         <div class="agent-modal">
             <div class="agent-head">
                 <h2>🤖 Javelin Coding Agent</h2>
-                <div style="display:flex;align-items:center;gap:8px">
+                <div class="agent-head-right">
                     <span class="agent-status" id="agentModalStatus">Idle</span>
                     <button class="icon-btn" id="agentModalClose" title="Close">✕</button>
                 </div>
@@ -1402,7 +1418,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                 <div class="agent-controls">
                     <textarea id="agentTaskInput" rows="2" placeholder="Describe the coding task — the agent will inspect, plan, edit and verify…"></textarea>
                     <div class="agent-row">
-                        <label class="grow" style="font-size:11px;color:var(--vscode-descriptionForeground);display:flex;align-items:center;gap:5px">
+                        <label class="grow field-label">
                             Autonomy:
                             <select id="agentModalAutonomy" title="How much Javelin may do without stopping to ask">
                                 <option value="ask">Ask every time</option>
@@ -1410,7 +1426,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                                 <option value="full">Full auto</option>
                             </select>
                         </label>
-                        <label style="font-size:11px;color:var(--vscode-descriptionForeground);display:flex;align-items:center;gap:5px">
+                        <label class="field-label">
                             <input type="checkbox" id="agentModalAutoApprove" checked> Auto-approve safe commands
                         </label>
                         <button class="btn btn-secondary" id="agentModalClear">Clear</button>
@@ -1423,7 +1439,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             </div>
             <div class="agent-foot">
                 <span id="agentModalSummary">Idle</span>
-                <button class="btn btn-secondary" id="agentModalStop" style="display:none">Stop</button>
+                <button class="btn btn-secondary hidden" id="agentModalStop">Stop</button>
             </div>
         </div>
     </div>
@@ -1435,7 +1451,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             <div class="modal-body" id="approvalBody"></div>
             <div class="modal-foot">
                 <label><input type="checkbox" id="approvalRemember"> Always allow this for the run</label>
-                <div style="display:flex;gap:6px">
+                <div class="modal-actions">
                     <button class="btn btn-secondary" id="approvalDeny">Deny</button>
                     <button class="btn btn-primary" id="approvalApprove">Approve</button>
                 </div>
@@ -1655,7 +1671,25 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             let out = escapeHtml(text);
             out = out.replace(/\`([^\`\\n]+)\`/g, '<code class="inline">$1</code>');
             out = out.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
-            out = out.replace(/\\[([^\\]]+)\\]\\((https?:[^)\\s]+)\\)/g, '<a href="$2">$1</a>');
+            // Markdown link -> anchor.
+            //
+            // This sits inside a template literal, so backslashes are doubled for the
+            // emitted HTML and the regex is easy to get subtly wrong. Two forms were
+            // tried here and both produced an UNBALANCED regex, which is a syntax
+            // error, which meant the whole webview script never parsed and NO button
+            // in the panel ever got its click handler:
+            //   - a literal ')' inside a character class
+            //   - an escaped ']' inside a character class (it closes the class early)
+            // So the label class avoids both: it matches any run of characters that is
+            // neither '[' nor ']' by using a negated set over a single alternative.
+            out = out.replace(/\\[(.+?)\\]\\((.+?)\\)/g, function (m, label, href) {
+                if (label.indexOf('[') !== -1 || label.indexOf(']') !== -1) {
+                    return m;
+                }
+                return /^(https?:|mailto:)/.test(href)
+                    ? '<a href="' + href + '">' + label + '</a>'
+                    : m;
+            });
             return out
                 .split(/\\n{2,}/)
                 .map(function (block) {
@@ -1988,14 +2022,14 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             approvalApprove.textContent = isDelete ? 'Delete file' : 'Approve';
             approvalApprove.classList.toggle('btn-danger', isDelete);
             if (request.name === 'run_command') {
-                approvalBody.innerHTML = '<pre style="border:1px solid var(--vscode-panel-border);border-radius:4px;padding:8px;overflow-x:auto">$ '
+                approvalBody.innerHTML = '<pre class="command-preview">$ '
                     + escapeHtml(request.args.command) + '</pre>';
             } else if (request.diff) {
                 approvalBody.innerHTML = renderDiff(request.diff);
                 const node = approvalBody.querySelector('.diff');
                 if (node) { node.classList.add('open'); }
             } else {
-                approvalBody.innerHTML = '<pre style="white-space:pre-wrap;font-size:11px">'
+                approvalBody.innerHTML = '<pre class="approval-note">'
                     + escapeHtml(String(request.args.content || request.args.new_string || '')) + '</pre>';
             }
             approvalBackdrop.classList.add('on');
