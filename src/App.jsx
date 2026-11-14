@@ -38,6 +38,7 @@ import {
   Plus, X, FileText, ImagePlus, Download,
 } from 'lucide-react'
 import { generateImage, imagePromptIssue, imageRequestSubject, isImageRequest } from './lib/imageGeneration'
+import { readImageForTextModel } from './lib/imageReading'
 
 const STORAGE = {
   apiKey: 'javelin.apiKey',
@@ -161,7 +162,7 @@ async function prepareTextAttachment(file) {
   }
 }
 
-function messageForApi(message) {
+function messageForApi(message, { textOnly = false } = {}) {
   const attachments = Array.isArray(message?.attachments) ? message.attachments : []
   const files = attachments.filter((attachment) => attachment?.kind === 'file' && attachment.text)
   const images = attachments.filter((attachment) => attachment?.kind === 'image' && attachment.dataUrl)
@@ -170,8 +171,16 @@ function messageForApi(message) {
   for (const file of files) {
     parts.push(`<attached_file name="${String(file.name).replace(/"/g, '&quot;')}"${file.truncated ? ' truncated="true"' : ''}>\n${file.text}\n</attached_file>`)
   }
+  // A text-only model cannot receive image parts. Use the reading produced when the
+  // image was attached; older images without one are clearly marked instead of
+  // silently vanishing from the conversation.
+  if (textOnly) {
+    for (const image of images) {
+      parts.push(`<attached_image name="${String(image.name || 'attachment').replace(/"/g, '&quot;')}">\n${image.analysis || 'An image was attached, but its contents were not read automatically.'}\n</attached_image>`)
+    }
+  }
   const text = parts.join('\n\n').trim()
-  if (!images.length) return { role: message.role, content: text }
+  if (textOnly || !images.length) return { role: message.role, content: text }
   return {
     role: message.role,
     content: [
@@ -373,6 +382,7 @@ function App() {
   const [attachments, setAttachments] = useState([])
   const [attachmentError, setAttachmentError] = useState('')
   const [attachmentBusy, setAttachmentBusy] = useState(false)
+  const [imageReadStage, setImageReadStage] = useState('')
   const attachmentInputRef = useRef(null)
   const [imageMode, setImageMode] = useState(false)
   const [imageBusy, setImageBusy] = useState(false)
@@ -1386,10 +1396,6 @@ function App() {
       })
       return
     }
-    if (hasImages && provider.vision === false) {
-      setAttachmentError('This model reads text only. Switch to Gemini, OpenAI, or a vision-capable local model in Settings to send images.')
-      return
-    }
     // Agent and Javelin runs are serial. Plain chat replies are independent and can
     // overlap, up to the per-install cap.
     if (useAgent || useJavelinMode) {
@@ -1410,11 +1416,37 @@ function App() {
     setRunResult(null)
     setAttachmentError('')
 
+    // The free default model only accepts text. OCR + a caption turn each attached
+    // image into text before the request, so an image is never silently dropped and
+    // the user does not need to configure a paid vision provider first.
+    let preparedAttachments = attachments
+    if (hasImages && provider.vision === false && !useAgent && !useJavelinMode) {
+      setAttachmentBusy(true)
+      setImageReadStage('Reading the image…')
+      try {
+        preparedAttachments = await Promise.all(attachments.map(async (attachment) => {
+          if (attachment.kind !== 'image' || attachment.analysis) return attachment
+          try {
+            const reading = await readImageForTextModel(attachment, { onStage: setImageReadStage })
+            return { ...attachment, analysis: reading.analysis }
+          } catch {
+            return {
+              ...attachment,
+              analysis: 'An image was attached, but its contents could not be read automatically.',
+            }
+          }
+        }))
+      } finally {
+        setImageReadStage('')
+        setAttachmentBusy(false)
+      }
+    }
+
     const userMsg = {
       id: nextMessageId(),
       role: 'user',
       content,
-      attachments,
+      attachments: preparedAttachments,
       ts: Date.now(),
     }
     setAttachments([])
@@ -1510,16 +1542,11 @@ function App() {
       return
     }
     const history = [...messages, userMsg]
-    // A text-only provider rejects the whole request if an older message still
-    // carries an image part. Keep the conversation text and drop past images.
-    const apiHistory = history.map(messageForApi).map((message) => {
-      if (provider.vision !== false || !Array.isArray(message.content)) return message
-      const text = message.content
-        .filter((part) => part?.type === 'text')
-        .map((part) => part.text)
-        .join('\n\n')
-      return { ...message, content: text }
-    })
+    // A text-only provider rejects image parts. Its messages carry the OCR/caption
+    // reading instead, including images from earlier turns that were already read.
+    const apiHistory = history.map((message) => messageForApi(message, {
+      textOnly: provider.vision === false,
+    }))
 
     if (!useAgent) {
       // ---- Plain chat path (provider-agnostic) ----
@@ -2252,7 +2279,6 @@ function App() {
 
   const hasMessages = messages.length > 0
   const pendingImages = attachments.some((attachment) => attachment.kind === 'image')
-  const imageInputUnsupported = pendingImages && provider.vision === false
   const availableExamples = mobileChatOnly ? EXAMPLES.filter((example) => example.mode === 'chat') : EXAMPLES
   const heroExamples = mobileChatOnly && imageMode ? IMAGE_EXAMPLES : availableExamples
   const examplePreviewCount = mobileChatOnly ? 4 : 6
@@ -2770,22 +2796,28 @@ function App() {
             </div>
           )}
           {attachments.length > 0 && !imageMode && (
-            <p className="attachment-rights-note">Only attach files and images you have the right to use.</p>
+            <>
+              <p className="attachment-rights-note">Only attach files and images you have the right to use.</p>
+              {pendingImages && provider.vision === false && (
+                <p className="attachment-rights-note">
+                  Javelin reads attached images with local text recognition and a free caption service.
+                </p>
+              )}
+            </>
           )}
           {imageError && (
             <div className="attachment-notice is-warning" role="status">
               <span>{imageError}</span>
             </div>
           )}
-          {!imageMode && (attachmentError || imageInputUnsupported) && (
-            <div className={`attachment-notice${imageInputUnsupported ? ' is-warning' : ''}`}>
-              {imageInputUnsupported ? (
-                <button type="button" onClick={() => setSettingsOpen(true)}>
-                  This model reads text only. Tap to choose a vision model for images.
-                </button>
-              ) : (
-                <span>{attachmentError}</span>
-              )}
+          {!imageMode && imageReadStage && (
+            <div className="attachment-notice" role="status">
+              <span>{imageReadStage}</span>
+            </div>
+          )}
+          {!imageMode && attachmentError && (
+            <div className="attachment-notice" role="status">
+              <span>{attachmentError}</span>
             </div>
           )}
           {imageMode && (
@@ -2882,7 +2914,7 @@ function App() {
             )}
             <Button
               onClick={() => send()}
-              disabled={(!input.trim() && attachments.length === 0) || attachmentBusy || imageBusy || (!imageMode && imageInputUnsupported) || isStreaming || javelin.busy || activeChats >= MAX_CONCURRENT_RESPONSES}
+              disabled={(!input.trim() && attachments.length === 0) || attachmentBusy || imageBusy || isStreaming || javelin.busy || activeChats >= MAX_CONCURRENT_RESPONSES}
               className="composer-send h-10 shrink-0"
             >
               {imageMode ? <ImagePlus className="mr-2 h-4 w-4" /> : mobileChatOnly || mode === 'chat' ? <Send className="mr-2 h-4 w-4" /> : mode === 'agent' ? <Zap className="mr-2 h-4 w-4" /> : <Brain className="mr-2 h-4 w-4" />}

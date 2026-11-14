@@ -65,7 +65,8 @@
     "react-dom": "^18.3.1",
     "react-markdown": "^9.1.0",
     "remark-gfm": "^4.0.1",
-    "tailwind-merge": "^2.2.1"
+    "tailwind-merge": "^2.2.1",
+    "tesseract.js": "7.0.0"
   },
   "devDependencies": {
     "@monaco-editor/react": "^4.7.0",
