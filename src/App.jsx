@@ -52,6 +52,7 @@ const STORAGE = {
   autonomy: 'javelin.autonomy',
   cloudDefault: 'javelin.cloudDefaultAppliedV4',
   mobileCloud: 'javelin.mobileCloudProviderV1',
+  freeLaneLast: 'javelin.freeLaneLastRequest',
   speakReplies: 'javelin.voice.speak',
   liveVoice: 'javelin.voice.live',
   voiceURI: 'javelin.voice.uri',
@@ -222,6 +223,26 @@ function App() {
   const [autonomy, setAutonomy] = useLocalStorage(STORAGE.autonomy, 'ask')
 
   const [input, setInput] = useState('')
+  // The keyless direct endpoint allows one reply at a time and spaces requests.
+  // Keep the composer honest instead of surfacing a second-request 429.
+  const [freeLaneCooldownUntil, setFreeLaneCooldownUntil] = useState(() => {
+    try {
+      const last = Number(localStorage.getItem(STORAGE.freeLaneLast)) || 0
+      return last ? Math.max(0, last + 45_000) : 0
+    } catch {
+      return 0
+    }
+  })
+  const [clockNow, setClockNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!freeLaneCooldownUntil) return undefined
+    const timer = window.setInterval(() => {
+      const now = Date.now()
+      setClockNow(now)
+      if (now >= freeLaneCooldownUntil) setFreeLaneCooldownUntil(0)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [freeLaneCooldownUntil])
   // Voice: spoken replies, hands-free live mode, and the chosen system voice.
   const [speakReplies, setSpeakReplies] = useLocalStorage(STORAGE.speakReplies, false)
   const [liveVoice, setLiveVoice] = useLocalStorage(STORAGE.liveVoice, false)
@@ -1036,6 +1057,7 @@ function App() {
     // so those never start a workspace run. A real task verb still does.
     const useJavelinMode = target === 'javelin' && !isConversational(content)
     if (!content || isBusy) return
+    if (providerId === 'javelinclouddirect' && freeLaneCooldownUntil > Date.now()) return
     if (provider.requiresKey && !apiKey) {
       setSettingsOpen(true)
       return
@@ -1045,6 +1067,12 @@ function App() {
     setError(null)
     setInput('')
     setRunResult(null)
+    if (providerId === 'javelinclouddirect') {
+      const now = Date.now()
+      try { localStorage.setItem(STORAGE.freeLaneLast, String(now)) } catch { /* storage is optional */ }
+      setFreeLaneCooldownUntil(now + 45_000)
+      setClockNow(now)
+    }
 
     const userMsg = { role: 'user', content, ts: Date.now() }
 
@@ -1464,7 +1492,7 @@ function App() {
       textareaRef.current?.focus()
     }
   }, [
-    apiKey, baseUrl, autonomy, input, isBusy, isStreaming, messages, mobileChatOnly, mode, model, provider, providerId,
+    apiKey, baseUrl, autonomy, freeLaneCooldownUntil, input, isBusy, isStreaming, messages, mobileChatOnly, mode, model, provider, providerId,
     reserveAiUsage, recordAccountTokens, recordRunTokens,
     setMessages, setWorkspaceFiles, syncDesktopChanges, desktopApi, runDesktopCommand, ensureDesktopRuntime,
     // Without this, `send` kept the speakReply from the first render — whose live
@@ -1856,6 +1884,9 @@ function App() {
   }
 
   const hasMessages = messages.length > 0
+  const freeLaneCooldownSeconds = providerId === 'javelinclouddirect'
+    ? Math.max(0, Math.ceil((freeLaneCooldownUntil - clockNow) / 1000))
+    : 0
   const availableExamples = mobileChatOnly ? EXAMPLES.filter((example) => example.mode === 'chat') : EXAMPLES
   const fileCount = Object.keys(workspaceFiles).length
   const accountBadge = isOwner
@@ -2328,8 +2359,10 @@ function App() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
               placeholder={
-                mobileChatOnly || mode === 'chat'
-                  ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
+                freeLaneCooldownSeconds > 0
+                  ? `Free reply ready in ${freeLaneCooldownSeconds}s — or switch provider in Settings`
+                  : mobileChatOnly || mode === 'chat'
+                    ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
                   : mode === 'agent'
                     ? 'Describe the task — the agent will inspect, plan, edit and verify…'
                     : 'Describe the task — Javelin will plan, act, verify and repair its own mistakes…'
@@ -2381,7 +2414,7 @@ function App() {
                 Stop
               </Button>
             ) : (
-              <Button onClick={() => send()} disabled={!input.trim()} className="h-10 shrink-0">
+              <Button onClick={() => send()} disabled={!input.trim() || freeLaneCooldownSeconds > 0} className="h-10 shrink-0">
                 {mobileChatOnly || mode === 'chat' ? <Send className="mr-2 h-4 w-4" /> : mode === 'agent' ? <Zap className="mr-2 h-4 w-4" /> : <Brain className="mr-2 h-4 w-4" />}
                 {mobileChatOnly || mode === 'chat' ? 'Send' : mode === 'agent' ? 'Run' : 'Think'}
               </Button>
@@ -2413,6 +2446,11 @@ function App() {
                 ? 'The agent asks before every file change. You can stop it at any time.'
                 : 'Javelin asks before every change, verifies its work, and never repeats a failed step twice.'}
           </p>
+          {freeLaneCooldownSeconds > 0 && (
+            <p className="mt-1 text-center text-[11px] text-amber-600">
+              Javelin Cloud Direct: next free reply in {freeLaneCooldownSeconds}s. Switch provider in Settings for faster replies.
+            </p>
+          )}
           {!isOwner && (
             <p className="mt-1 text-center text-[11px] text-muted-foreground">
               {account
