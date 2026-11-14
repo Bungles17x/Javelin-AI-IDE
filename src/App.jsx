@@ -102,6 +102,27 @@ function useLocalStorage(key, initial) {
   return [value, setValue]
 }
 
+function useMobileChatViewport() {
+  const [matches, setMatches] = useState(() => (
+    typeof window !== 'undefined' && window.matchMedia?.('(max-width: 820px)').matches
+  ))
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined
+    const query = window.matchMedia('(max-width: 820px)')
+    const update = () => setMatches(query.matches)
+    update()
+    query.addEventListener?.('change', update)
+    window.addEventListener('resize', update)
+    window.addEventListener('orientationchange', update)
+    return () => {
+      query.removeEventListener?.('change', update)
+      window.removeEventListener('resize', update)
+      window.removeEventListener('orientationchange', update)
+    }
+  }, [])
+  return matches
+}
+
 function changedWorkspacePaths(before, after) {
   const paths = new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])
   return [...paths].filter((path) => before?.[path] !== after?.[path])
@@ -122,6 +143,8 @@ function projectFilesForSnapshot(files, existingFiles = []) {
 
 function App() {
   const desktopApi = window.javelinDesktop ?? null
+  const mobileViewport = useMobileChatViewport()
+  const mobileChatOnly = !desktopApi && mobileViewport
   const [providerId, setProviderId] = useLocalStorage(STORAGE.provider, DEFAULT_CLOUD_PROVIDER)
   const [apiKey, setApiKey] = useLocalStorage(STORAGE.apiKey, '')
   const [legacyBaseUrl] = useLocalStorage(STORAGE.baseUrl, '')
@@ -145,6 +168,10 @@ function App() {
     })
   }, [setMessages])
   const [mode, setMode] = useLocalStorage(STORAGE.mode, 'chat')
+  useEffect(() => {
+    if (mobileChatOnly && mode !== 'chat') setMode('chat')
+    document.title = mobileChatOnly ? 'Javelin AI Chat' : 'Javelin AI IDE'
+  }, [mobileChatOnly, mode, setMode])
   const [cloudDefaultApplied, setCloudDefaultApplied] = useLocalStorage(STORAGE.cloudDefault, false)
   const [showAllExamples, setShowAllExamples] = useState(false)
   const [workspaceFiles, setWorkspaceFiles] = useLocalStorage(STORAGE.workspace, {})
@@ -964,8 +991,8 @@ function App() {
 
   const send = useCallback(async (text, forcedMode) => {
     const content = (text ?? input).trim()
-    const target = forcedMode ?? mode
-    const autoRouteToAgent = target === 'chat' && shouldRunWorkspaceAgent(content)
+    const target = mobileChatOnly ? 'chat' : (forcedMode ?? mode)
+    const autoRouteToAgent = !mobileChatOnly && target === 'chat' && shouldRunWorkspaceAgent(content)
     const useAgent = target === 'agent' || autoRouteToAgent
     // Conversational covers greetings, laughs and reactions ("lol", "you?", "why?"),
     // so those never start a workspace run. A real task verb still does.
@@ -1399,7 +1426,7 @@ function App() {
       textareaRef.current?.focus()
     }
   }, [
-    apiKey, baseUrl, autonomy, input, isBusy, isStreaming, messages, mode, model, provider, providerId,
+    apiKey, baseUrl, autonomy, input, isBusy, isStreaming, messages, mobileChatOnly, mode, model, provider, providerId,
     reserveAiUsage, recordAccountTokens, recordRunTokens,
     setMessages, setWorkspaceFiles, syncDesktopChanges, desktopApi, runDesktopCommand, ensureDesktopRuntime,
     // Without this, `send` kept the speakReply from the first render — whose live
@@ -1791,6 +1818,7 @@ function App() {
   }
 
   const hasMessages = messages.length > 0
+  const availableExamples = mobileChatOnly ? EXAMPLES.filter((example) => example.mode === 'chat') : EXAMPLES
   const fileCount = Object.keys(workspaceFiles).length
   const accountBadge = isOwner
     ? 'Owner'
@@ -1807,7 +1835,7 @@ function App() {
     <div
       className={desktopApi
         ? `javelin-desktop-layout${assistantCollapsed ? ' is-assistant-collapsed' : ''}`
-        : 'javelin-browser-layout'}
+        : `javelin-browser-layout${mobileChatOnly ? ' is-mobile-chat' : ''}`}
       style={desktopApi ? { '--assistant-width': `${assistantPanelWidth}px` } : undefined}
     >
       {desktopApi && (
@@ -1885,7 +1913,7 @@ function App() {
               <h1 className="bg-gradient-to-r from-primary to-blue-600 bg-clip-text text-xl font-bold text-transparent">
                 Javelin AI
               </h1>
-              <span className="brand-tagline">LOCAL-FIRST CODING INTELLIGENCE</span>
+              <span className="brand-tagline">{mobileChatOnly ? 'MOBILE CHAT' : 'LOCAL-FIRST CODING INTELLIGENCE'}</span>
             </div>
             <span className="glass-chip ml-2 hidden px-2 py-0.5 text-xs text-muted-foreground sm:inline">
               {provider.label} · {currentModel}
@@ -1920,6 +1948,7 @@ function App() {
               <Button
                 variant="ghost"
                 size="icon"
+                className="mobile-desktop-only"
                 onClick={requestAdmin}
                 aria-label="Moderation console"
                 title="Moderation console"
@@ -1930,6 +1959,7 @@ function App() {
             <Button
               variant="ghost"
               size="icon"
+              className="mobile-desktop-only"
               onClick={requestDebug}
               aria-label="Debug console"
               title="Debug console (owner)"
@@ -1937,7 +1967,7 @@ function App() {
               <Bug className="h-4 w-4" />
             </Button>
             {dirty && (
-              <Button variant="outline" size="sm" onClick={exportWorkspace} className="h-8 text-xs">
+              <Button variant="outline" size="sm" onClick={exportWorkspace} className="mobile-desktop-only h-8 text-xs">
                 Export changes
               </Button>
             )}
@@ -1963,6 +1993,7 @@ function App() {
             <Button
               variant="ghost"
               size="icon"
+              className="mobile-desktop-only"
               onClick={() => setAssistantCollapsed(true)}
               aria-label="Hide assistant"
               title="Hide assistant (Ctrl+Shift+A)"
@@ -1991,6 +2022,7 @@ function App() {
         </div>
 
         {/* Mode switch: Chat (simple) vs Agent (autonomous loop) */}
+        {!mobileChatOnly && (
         <div className="container relative mx-auto flex max-w-4xl items-center gap-1 px-4 pb-2">
           <div className="mode-menu">
             <ModeTab active={mode === 'chat'} onClick={() => setMode('chat')} icon={MessageSquare} label="Chat" disabled={isBusy} />
@@ -2019,6 +2051,7 @@ function App() {
 
           <span className="workspace-file-count text-xs text-muted-foreground">{fileCount} file(s) in workspace</span>
         </div>
+        )}
       </header>
 
       {/* Conversation */}
@@ -2043,26 +2076,30 @@ function App() {
           {!hasMessages && (
             <div className="chat-hero">
               <span className="chat-hero-orb"><Bot size={23} /></span>
-              <span className="chat-hero-kicker">JAVELIN WORKSPACE</span>
-              <h2 className="chat-hero-title">{mode === 'chat'
+              <span className="chat-hero-kicker">{mobileChatOnly ? 'JAVELIN CHAT' : 'JAVELIN WORKSPACE'}</span>
+              <h2 className="chat-hero-title">{mobileChatOnly
+                ? 'Ask Javelin anything'
+                : mode === 'chat'
                 ? 'What are we building?'
                 : mode === 'agent'
                   ? 'Give the agent a task'
                   : 'Give Javelin a task'}</h2>
               <p className="chat-hero-copy">
-                {mode === 'chat'
+                {mobileChatOnly
+                  ? 'Chat from your phone. Ask questions, get explanations, and talk through ideas — no code editing or workspace tools.'
+                  : mode === 'chat'
                   ? 'Ask for explanations or advice. Direct requests to create or change project files automatically use Agent.'
                   : mode === 'agent'
                     ? 'It inspects the workspace, plans, edits with reviewable diffs, and reports what it verified.'
                     : 'Javelin runs its own reasoning loop: understand, plan, act, verify, and repair its own mistakes. It remembers what failed.'}
               </p>
-              <div className="chat-hero-capabilities">
+              {!mobileChatOnly && <div className="chat-hero-capabilities">
                 <span><Zap size={12} /> Agentic edits</span>
                 <span><CheckCircle2 size={12} /> Evidence-based verification</span>
                 <span><Brain size={12} /> Local reasoning memory</span>
-              </div>
+              </div>}
               <div className="example-grid">
-                {EXAMPLES.slice(0, showAllExamples ? EXAMPLES.length : 6).map((ex) => (
+                {availableExamples.slice(0, showAllExamples ? availableExamples.length : 6).map((ex) => (
                   <button
                     key={ex.text}
                     className="example-card"
@@ -2074,11 +2111,13 @@ function App() {
                   </button>
                 ))}
               </div>
-              <button className="example-more" type="button" onClick={() => setShowAllExamples((open) => !open)}>
-                {showAllExamples ? 'Show fewer ideas' : `More ideas (${EXAMPLES.length - 6})`}
-              </button>
+              {availableExamples.length > 6 && (
+                <button className="example-more" type="button" onClick={() => setShowAllExamples((open) => !open)}>
+                  {showAllExamples ? 'Show fewer ideas' : `More ideas (${availableExamples.length - 6})`}
+                </button>
+              )}
 
-              {(mode === 'agent' || mode === 'javelin') && (
+              {!mobileChatOnly && (mode === 'agent' || mode === 'javelin') && (
                 <div className="glass-card mx-auto mt-6 max-w-md rounded-2xl p-4 text-left text-xs">
                   <p className="font-medium">The agent needs files to work on.</p>
                   <p className="mt-1 text-muted-foreground">
@@ -2114,11 +2153,11 @@ function App() {
             </div>
           )}
 
-          {checkpoints.length > 0 && (
+          {!mobileChatOnly && checkpoints.length > 0 && (
             <CheckpointBar checkpoints={checkpoints} onRestore={restoreCheckpoint} />
           )}
 
-          {pendingDecision && (
+          {!mobileChatOnly && pendingDecision && (
             <RunControls
               fileCount={pendingDecision.fileCount}
               status={pendingDecision.status}
@@ -2131,7 +2170,7 @@ function App() {
           )}
 
           {/* Always offer message-undo after a run, even if nothing changed. */}
-          {!pendingDecision && runResult && (
+          {!mobileChatOnly && !pendingDecision && runResult && (
             <RunControls
               fileCount={0}
               status={runResult.status}
@@ -2143,10 +2182,10 @@ function App() {
             />
           )}
 
-          {isStreaming && mode === 'agent' && <AgentPhase phase={phase} status={statusText} />}
+          {!mobileChatOnly && isStreaming && mode === 'agent' && <AgentPhase phase={phase} status={statusText} />}
 
           {/* Javelin Core: its own reasoning lifecycle, memory and self-correction */}
-          {mode === 'javelin' && (
+          {!mobileChatOnly && mode === 'javelin' && (
             <>
               {(javelin.busy || javelin.phase) && <PhaseRail phase={javelin.phase} busy={javelin.busy} />}
               <JavelinDiagnostics
@@ -2174,13 +2213,13 @@ function App() {
             />
           ))}
 
-          {steps.length > 0 && <AgentTimeline steps={steps} />}
+          {!mobileChatOnly && steps.length > 0 && <AgentTimeline steps={steps} />}
 
-          {mode === 'javelin' && javelin.steps.length > 0 && <JavelinSteps steps={javelin.steps} />}
+          {!mobileChatOnly && mode === 'javelin' && javelin.steps.length > 0 && <JavelinSteps steps={javelin.steps} />}
 
-          {mode === 'javelin' && javelin.result && <JavelinResult result={javelin.result} />}
+          {!mobileChatOnly && mode === 'javelin' && javelin.result && <JavelinResult result={javelin.result} />}
 
-          {mode === 'javelin' && javelin.error && (
+          {!mobileChatOnly && mode === 'javelin' && javelin.error && (
             <div role="alert" className="glass-banner flex items-start gap-3 rounded-2xl border-destructive/40 bg-destructive/10 p-4 text-sm">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
               <div className="flex-1">
@@ -2191,7 +2230,7 @@ function App() {
             </div>
           )}
 
-          {runResult && (
+          {!mobileChatOnly && runResult && (
             <div
               className={`glass-banner flex items-start gap-2 rounded-2xl border p-3 text-xs ${
                 runResult.status === 'done'
@@ -2251,7 +2290,7 @@ function App() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
               placeholder={
-                mode === 'chat'
+                mobileChatOnly || mode === 'chat'
                   ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
                   : mode === 'agent'
                     ? 'Describe the task — the agent will inspect, plan, edit and verify…'
@@ -2305,8 +2344,8 @@ function App() {
               </Button>
             ) : (
               <Button onClick={() => send()} disabled={!input.trim()} className="h-10 shrink-0">
-                {mode === 'chat' ? <Send className="mr-2 h-4 w-4" /> : mode === 'agent' ? <Zap className="mr-2 h-4 w-4" /> : <Brain className="mr-2 h-4 w-4" />}
-                {mode === 'chat' ? 'Send' : mode === 'agent' ? 'Run' : 'Think'}
+                {mobileChatOnly || mode === 'chat' ? <Send className="mr-2 h-4 w-4" /> : mode === 'agent' ? <Zap className="mr-2 h-4 w-4" /> : <Brain className="mr-2 h-4 w-4" />}
+                {mobileChatOnly || mode === 'chat' ? 'Send' : mode === 'agent' ? 'Run' : 'Think'}
               </Button>
             )}
           </div>
@@ -2330,7 +2369,7 @@ function App() {
             {voiceNotice && <span className="text-[11px] text-amber-600">{voiceNotice}</span>}
           </div>
           <p className="mt-2 text-center text-xs text-muted-foreground">
-            {mode === 'chat'
+            {mobileChatOnly || mode === 'chat'
               ? 'Responses are generated by an LLM and may be wrong. Verify before shipping.'
               : mode === 'agent'
                 ? 'The agent asks before every file change. You can stop it at any time.'
@@ -2438,7 +2477,7 @@ function App() {
       <SupportDialog
         open={supportOpen}
         onClose={() => setSupportOpen(false)}
-        mode={mode}
+        mode={mobileChatOnly ? 'chat' : mode}
         providerLabel={provider.label}
         account={account}
       />
