@@ -55,7 +55,6 @@ const STORAGE = {
   autonomy: 'javelin.autonomy',
   cloudDefault: 'javelin.cloudDefaultAppliedV4',
   mobileCloud: 'javelin.mobileCloudProviderV1',
-  freeLaneLast: 'javelin.freeLaneLastRequest',
   speakReplies: 'javelin.voice.speak',
   liveVoice: 'javelin.voice.live',
   voiceURI: 'javelin.voice.uri',
@@ -72,9 +71,8 @@ const STORAGE = {
 // Chat replies are independent. A busy answer must not lock the composer; the
 // only shared limit is the number of requests this install will keep in flight.
 const MAX_CONCURRENT_RESPONSES = 100
-// The keyless upstream accepts one reply at a time and spaces starts. The queue
-// below honors that in the background; it never disables the composer.
-const FREE_LANE_GAP_MS = 30_000
+// The keyless upstream accepts one reply at a time. Keep those requests queued so
+// they do not race, but do not add a fixed cooldown between starts.
 const MAX_ATTACHMENTS = 4
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 const MAX_FILE_TEXT_CHARS = 20_000
@@ -188,31 +186,6 @@ function messageForApi(message, { textOnly = false } = {}) {
       ...images.map((image) => ({ type: 'image_url', image_url: { url: image.dataUrl } })),
     ],
   }
-}
-
-function abortableDelay(ms, signal) {
-  return new Promise((resolve, reject) => {
-    const abort = () => {
-      const error = new Error('Aborted')
-      error.name = 'AbortError'
-      reject(error)
-    }
-    if (signal?.aborted) {
-      abort()
-      return
-    }
-    const cleanup = () => signal?.removeEventListener?.('abort', onAbort)
-    const timer = window.setTimeout(() => {
-      cleanup()
-      resolve()
-    }, ms)
-    const onAbort = () => {
-      window.clearTimeout(timer)
-      cleanup()
-      abort()
-    }
-    signal?.addEventListener?.('abort', onAbort, { once: true })
-  })
 }
 
 const IMAGE_EXAMPLES = [
@@ -530,14 +503,6 @@ function App() {
   // disturb the others, and Stop can abort the whole set.
   const chatAbortsRef = useRef(new Set())
   const providerQueuesRef = useRef(new Map())
-  const freeLaneNextAtRef = useRef((() => {
-    try {
-      const last = Number(localStorage.getItem(STORAGE.freeLaneLast)) || 0
-      return last ? last + FREE_LANE_GAP_MS : 0
-    } catch {
-      return 0
-    }
-  })())
 
   const beginChatResponse = useCallback(() => {
     activeChatsRef.current += 1
@@ -554,23 +519,15 @@ function App() {
   }, [])
 
   // Some free endpoints accept a single request at a time. Keep those calls in a
-  // per-provider queue, with the upstream's spacing enforced behind the scenes, so
-  // dozens of replies can be requested without turning into a burst of 429s. Keyed
-  // providers skip this and run fully in parallel.
+  // per-provider queue so they do not race; there is deliberately no fixed cooldown
+  // between starts. Keyed providers run fully in parallel.
   const enqueueProviderTask = useCallback((providerId, task, signal) => {
     const previous = providerQueuesRef.current.get(providerId) ?? Promise.resolve()
-    const run = previous.catch(() => {}).then(async () => {
+    const run = previous.catch(() => {}).then(() => {
       if (signal?.aborted) {
         const error = new Error('Aborted')
         error.name = 'AbortError'
         throw error
-      }
-      if (providerId === 'javelinclouddirect') {
-        const wait = freeLaneNextAtRef.current - Date.now()
-        if (wait > 0) await abortableDelay(wait, signal)
-        const startedAt = Date.now()
-        freeLaneNextAtRef.current = startedAt + FREE_LANE_GAP_MS
-        try { localStorage.setItem(STORAGE.freeLaneLast, String(startedAt)) } catch { /* storage is optional */ }
       }
       return task()
     })
@@ -2981,7 +2938,6 @@ function App() {
           {activeChats > 0 && (
             <p className="mt-1 text-center text-[11px] text-muted-foreground">
               {activeChats} {activeChats === 1 ? 'reply' : 'replies'} running
-              {providerId === 'javelinclouddirect' ? ' · free replies are spaced by the provider' : ''}
             </p>
           )}
           {!isOwner && (

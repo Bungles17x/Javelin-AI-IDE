@@ -7,6 +7,9 @@
 // an originality suffix and a negative prompt. The UI labels the result as an
 // AI-generated image and tells the user to check it before commercial use.
 const IMAGE_ENDPOINT = 'https://image.pollinations.ai/prompt/'
+const HORDE_ENDPOINT = 'https://aihorde.net/api/v2'
+const HORDE_ANON_KEY = '0000000000'
+const HORDE_CLIENT_AGENT = 'Javelin:1.0:(https://bungles17x.github.io)'
 const MAX_PROMPT_CHARS = 1_200
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024
 const REQUEST_TIMEOUT_MS = 120_000
@@ -160,11 +163,125 @@ function readBlobAsDataUrl(blob) {
   })
 }
 
+function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }))
+      return
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      clearTimeout(timer)
+      reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }))
+    }
+    signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
+}
+
+function hordeHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    apikey: HORDE_ANON_KEY,
+    'Client-Agent': HORDE_CLIENT_AGENT,
+  }
+}
+
+/**
+ * Anonymous AI Horde backup. It uses a 512px Stable Diffusion worker instead of
+ * Flux, but it is a separate queue, so a Pollinations per-IP cooldown does not
+ * leave the user waiting for a timer.
+ */
+async function generateImageWithHorde({ prompt, signal }) {
+  const controller = new AbortController()
+  const onAbort = () => controller.abort()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, REQUEST_TIMEOUT_MS)
+  signal?.addEventListener?.('abort', onAbort, { once: true })
+
+  try {
+    const queuedResponse = await fetch(`${HORDE_ENDPOINT}/generate/async`, {
+      method: 'POST',
+      headers: hordeHeaders(),
+      signal: controller.signal,
+      body: JSON.stringify({
+        prompt: `${buildImagePrompt(prompt)}###${buildNegativePrompt(prompt)}`,
+        params: {
+          width: 512,
+          height: 512,
+          steps: 20,
+          cfg_scale: 7,
+          sampler_name: 'k_euler',
+          n: 1,
+        },
+        nsfw: false,
+        censor_nsfw: true,
+        models: ['stable_diffusion'],
+        r2: true,
+      }),
+    })
+    if (!queuedResponse.ok) {
+      throw new Error(`backup image service returned ${queuedResponse.status}`)
+    }
+    const queued = await queuedResponse.json()
+    if (!queued?.id) throw new Error('backup image service did not return a job id')
+
+    const deadline = Date.now() + REQUEST_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      await wait(1_000, controller.signal)
+      const checkResponse = await fetch(`${HORDE_ENDPOINT}/generate/check/${queued.id}`, {
+        headers: hordeHeaders(),
+        signal: controller.signal,
+      })
+      if (!checkResponse.ok) throw new Error(`backup status returned ${checkResponse.status}`)
+      const status = await checkResponse.json()
+      if (status?.done) break
+      if (status?.faulted) throw new Error('backup image service could not generate this image')
+    }
+
+    const statusResponse = await fetch(`${HORDE_ENDPOINT}/generate/status/${queued.id}`, {
+      headers: hordeHeaders(),
+      signal: controller.signal,
+    })
+    if (!statusResponse.ok) throw new Error(`backup image result returned ${statusResponse.status}`)
+    const status = await statusResponse.json()
+    if (!status?.done || status?.faulted) throw new Error('backup image service did not finish')
+    const generation = status.generations?.[0]
+    if (!generation?.img) throw new Error('backup image service returned no image')
+
+    const imageResponse = await fetch(generation.img, { signal: controller.signal })
+    if (!imageResponse.ok) throw new Error(`backup image download returned ${imageResponse.status}`)
+    const blob = await imageResponse.blob()
+    if (!blob.type.startsWith('image/')) throw new Error('backup image service returned a non-image')
+    if (blob.size > MAX_IMAGE_BYTES) throw new Error('backup image was too large to save')
+    return {
+      dataUrl: await readBlobAsDataUrl(blob),
+      mime: blob.type || 'image/webp',
+      bytes: blob.size,
+      seed: Number(generation.seed) || randomSeed(),
+      prompt: String(prompt ?? '').trim(),
+      provider: 'aihorde',
+    }
+  } catch (error) {
+    if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' })
+    if (timedOut) throw new Error('The backup image service took too long. Try a shorter description.')
+    throw error
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener?.('abort', onAbort)
+  }
+}
+
 /**
  * Generate one image from an already-screened prompt. The caller owns the
  * AbortController and should abort it from the Stop button.
  */
-export async function generateImage({ prompt, signal }) {
+async function generateImageWithPollinations({ prompt, signal }) {
   const seed = randomSeed()
   const params = new URLSearchParams({
     width: '1024',
@@ -191,30 +308,40 @@ export async function generateImage({ prompt, signal }) {
     response = await fetch(url, { signal: controller.signal })
   } catch (error) {
     if (signal?.aborted) throw error
-    if (timedOut) throw new Error('The image service took too long. Try a shorter description.')
-    throw new Error('Could not reach the image service. Check your connection and try again.')
+    const serviceError = new Error(
+      timedOut
+        ? 'The image service took too long.'
+        : 'Could not reach the image service.',
+    )
+    serviceError.canFallback = true
+    throw serviceError
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener?.('abort', onAbort)
   }
 
   if (!response.ok) {
-    if (response.status === 402) {
-      const retry = Number(response.headers.get('retry-after')) || 45
-      throw new Error(`The free image service is cooling down. Try again in ${retry} seconds.`)
+    const error = new Error(`The image service returned ${response.status}.`)
+    error.status = response.status
+    // A per-IP queue limit or a temporary upstream failure gets the independent
+    // Horde queue instead of a visible cooldown. Policy/validation errors do not.
+    error.canFallback = [402, 429, 500, 502, 503, 504].includes(response.status)
+    if (!error.canFallback) {
+      error.message = `The image service returned ${response.status}. Try again or use a different description.`
     }
-    if (response.status === 429) {
-      throw new Error('The image service is busy. Wait a moment and try again.')
-    }
-    throw new Error(`The image service returned ${response.status}. Try again or use a different description.`)
+    throw error
   }
 
   const blob = await response.blob()
   if (!blob.type.startsWith('image/')) {
-    throw new Error('The image service did not return an image. Try a different description.')
+    const error = new Error('The image service did not return an image.')
+    error.canFallback = true
+    throw error
   }
   if (blob.size > MAX_IMAGE_BYTES) {
-    throw new Error('The generated image was too large to save. Try a simpler description.')
+    const error = new Error('The generated image was too large to save.')
+    error.canFallback = true
+    throw error
   }
   const dataUrl = await readBlobAsDataUrl(blob)
   return {
@@ -223,5 +350,29 @@ export async function generateImage({ prompt, signal }) {
     bytes: blob.size,
     seed,
     prompt: String(prompt ?? '').trim(),
+    provider: 'pollinations',
+  }
+}
+
+/**
+ * Generate one image from an already-screened prompt. The caller owns the
+ * AbortController and should abort it from the Stop button.
+ *
+ * Pollinations is the quality-first path. If its anonymous per-IP queue is full,
+ * switch immediately to the independent AI Horde queue rather than telling the
+ * user to wait for a cooldown. A content/policy rejection is not retried elsewhere.
+ */
+export async function generateImage({ prompt, signal }) {
+  try {
+    return await generateImageWithPollinations({ prompt, signal })
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError') throw error
+    if (!error?.canFallback) throw error
+    try {
+      return await generateImageWithHorde({ prompt, signal })
+    } catch (backupError) {
+      if (signal?.aborted || backupError?.name === 'AbortError') throw backupError
+      throw new Error('The free image services are busy right now. Try again.')
+    }
   }
 }
