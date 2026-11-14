@@ -66,6 +66,47 @@ const STORAGE = {
   assistantCollapsed: 'javelin.assistantCollapsed',
 }
 
+// Chat replies are independent. A busy answer must not lock the composer; the
+// only shared limit is the number of requests this install will keep in flight.
+const MAX_CONCURRENT_RESPONSES = 100
+// The keyless upstream accepts one reply at a time and spaces starts. The queue
+// below honors that in the background; it never disables the composer.
+const FREE_LANE_GAP_MS = 30_000
+
+let messageCounter = 0
+function nextMessageId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  messageCounter += 1
+  return `msg-${Date.now().toString(36)}-${messageCounter}`
+}
+
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      const error = new Error('Aborted')
+      error.name = 'AbortError'
+      reject(error)
+    }
+    if (signal?.aborted) {
+      abort()
+      return
+    }
+    const cleanup = () => signal?.removeEventListener?.('abort', onAbort)
+    const timer = window.setTimeout(() => {
+      cleanup()
+      resolve()
+    }, ms)
+    const onAbort = () => {
+      window.clearTimeout(timer)
+      cleanup()
+      abort()
+    }
+    signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
+}
+
 const EXAMPLES = [
   { text: 'Explain this code and suggest improvements', mode: 'chat' },
   { text: 'Create a React counter component with TypeScript', mode: 'chat' },
@@ -223,26 +264,9 @@ function App() {
   const [autonomy, setAutonomy] = useLocalStorage(STORAGE.autonomy, 'ask')
 
   const [input, setInput] = useState('')
-  // The keyless direct endpoint allows one reply at a time and spaces requests.
-  // Keep the composer honest instead of surfacing a second-request 429.
-  const [freeLaneCooldownUntil, setFreeLaneCooldownUntil] = useState(() => {
-    try {
-      const last = Number(localStorage.getItem(STORAGE.freeLaneLast)) || 0
-      return last ? Math.max(0, last + 45_000) : 0
-    } catch {
-      return 0
-    }
-  })
-  const [clockNow, setClockNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!freeLaneCooldownUntil) return undefined
-    const timer = window.setInterval(() => {
-      const now = Date.now()
-      setClockNow(now)
-      if (now >= freeLaneCooldownUntil) setFreeLaneCooldownUntil(0)
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [freeLaneCooldownUntil])
+  // Replies stream into their own bubbles; this is the only shared chat limit.
+  const [activeChats, setActiveChats] = useState(0)
+  const activeChatsRef = useRef(0)
   // Voice: spoken replies, hands-free live mode, and the chosen system voice.
   const [speakReplies, setSpeakReplies] = useLocalStorage(STORAGE.speakReplies, false)
   const [liveVoice, setLiveVoice] = useLocalStorage(STORAGE.liveVoice, false)
@@ -323,6 +347,58 @@ function App() {
   const [pendingDecision, setPendingDecision] = useState(null)
 
   const abortRef = useRef(null)
+  // Every chat reply has its own controller and message id. Aborting one does not
+  // disturb the others, and Stop can abort the whole set.
+  const chatAbortsRef = useRef(new Set())
+  const providerQueuesRef = useRef(new Map())
+  const freeLaneNextAtRef = useRef((() => {
+    try {
+      const last = Number(localStorage.getItem(STORAGE.freeLaneLast)) || 0
+      return last ? last + FREE_LANE_GAP_MS : 0
+    } catch {
+      return 0
+    }
+  })())
+
+  const beginChatResponse = useCallback(() => {
+    activeChatsRef.current += 1
+    setActiveChats(activeChatsRef.current)
+  }, [])
+
+  const finishChatResponse = useCallback(() => {
+    activeChatsRef.current = Math.max(0, activeChatsRef.current - 1)
+    setActiveChats(activeChatsRef.current)
+  }, [])
+
+  const stopChatResponses = useCallback(() => {
+    for (const controller of chatAbortsRef.current) controller.abort()
+  }, [])
+
+  // Some free endpoints accept a single request at a time. Keep those calls in a
+  // per-provider queue, with the upstream's spacing enforced behind the scenes, so
+  // dozens of replies can be requested without turning into a burst of 429s. Keyed
+  // providers skip this and run fully in parallel.
+  const enqueueProviderTask = useCallback((providerId, task, signal) => {
+    const previous = providerQueuesRef.current.get(providerId) ?? Promise.resolve()
+    const run = previous.catch(() => {}).then(async () => {
+      if (signal?.aborted) {
+        const error = new Error('Aborted')
+        error.name = 'AbortError'
+        throw error
+      }
+      if (providerId === 'javelinclouddirect') {
+        const wait = freeLaneNextAtRef.current - Date.now()
+        if (wait > 0) await abortableDelay(wait, signal)
+        const startedAt = Date.now()
+        freeLaneNextAtRef.current = startedAt + FREE_LANE_GAP_MS
+        try { localStorage.setItem(STORAGE.freeLaneLast, String(startedAt)) } catch { /* storage is optional */ }
+      }
+      return task()
+    })
+    providerQueuesRef.current.set(providerId, run.catch(() => {}))
+    return run
+  }, [])
+
   const workspaceRef = useRef(new VirtualWorkspace(workspaceFiles, workspaceDirectories))
   // One entry per user message: where it sits in the transcript and the checkpoint
   // taken just before it ran. Reverting a message needs both.
@@ -783,7 +859,7 @@ function App() {
   // Hold Javelin behind a ref so `send` stays stable across renders.
   const javelinRef = useRef(javelin)
   javelinRef.current = javelin
-  const isBusy = isStreaming || javelin.busy
+  const isBusy = isStreaming || activeChats > 0 || javelin.busy
 
   const openDesktopProject = useCallback(async () => {
     const snapshot = await desktopApi?.openWorkspace()
@@ -960,6 +1036,7 @@ function App() {
       if (e.key === 'Escape') {
         if (isBusy) {
           abortRef.current?.abort()
+          stopChatResponses()
           javelinRef.current?.stop()
         } else if (settingsOpen) {
           setSettingsOpen(false)
@@ -971,7 +1048,7 @@ function App() {
 
     window.addEventListener('keydown', handleGlobalKeydown)
     return () => window.removeEventListener('keydown', handleGlobalKeydown)
-  }, [assistantCollapsed, desktopApi, isBusy, setAssistantCollapsed, settingsOpen, supportOpen])
+  }, [assistantCollapsed, desktopApi, isBusy, setAssistantCollapsed, settingsOpen, stopChatResponses, supportOpen])
 
   useEffect(() => {
     const focusAssistant = () => {
@@ -1056,8 +1133,16 @@ function App() {
     // Conversational covers greetings, laughs and reactions ("lol", "you?", "why?"),
     // so those never start a workspace run. A real task verb still does.
     const useJavelinMode = target === 'javelin' && !isConversational(content)
-    if (!content || isBusy) return
-    if (providerId === 'javelinclouddirect' && freeLaneCooldownUntil > Date.now()) return
+    if (!content) return
+    // Agent and Javelin runs are serial. Plain chat replies are independent and can
+    // overlap, up to the per-install cap.
+    if (useAgent || useJavelinMode) {
+      if (isBusy) return
+    } else if (isStreaming || javelinRef.current?.busy) {
+      return
+    } else if (activeChatsRef.current >= MAX_CONCURRENT_RESPONSES) {
+      return
+    }
     if (provider.requiresKey && !apiKey) {
       setSettingsOpen(true)
       return
@@ -1067,14 +1152,8 @@ function App() {
     setError(null)
     setInput('')
     setRunResult(null)
-    if (providerId === 'javelinclouddirect') {
-      const now = Date.now()
-      try { localStorage.setItem(STORAGE.freeLaneLast, String(now)) } catch { /* storage is optional */ }
-      setFreeLaneCooldownUntil(now + 45_000)
-      setClockNow(now)
-    }
 
-    const userMsg = { role: 'user', content, ts: Date.now() }
+    const userMsg = { id: nextMessageId(), role: 'user', content, ts: Date.now() }
 
     // ---- Javelin Core path ------------------------------------------------
     // Javelin runs on its own runtime: phase machine, memory, self-correction.
@@ -1170,22 +1249,32 @@ function App() {
 
     if (!useAgent) {
       // ---- Plain chat path (provider-agnostic) ----
-      setMessages([...history, { role: 'assistant', content: '', ts: Date.now() }])
-      setIsStreaming(true)
+      // Each reply owns its bubble and controller. Other replies keep streaming when
+      // one finishes, so the composer stays free for the next question.
+      const assistantId = nextMessageId()
+      setMessages((prev) => [
+        ...prev,
+        userMsg,
+        { id: assistantId, role: 'assistant', content: '', ts: Date.now() },
+      ])
+      beginChatResponse()
 
       const controller = new AbortController()
-      abortRef.current = controller
+      chatAbortsRef.current.add(controller)
       let acc = ''
+      const updateAssistant = (nextContent) => {
+        setMessages((prev) => prev.map((message) => (
+          message.id === assistantId ? { ...message, content: nextContent } : message
+        )))
+      }
+      const removeAssistant = () => {
+        setMessages((prev) => prev.filter((message) => message.id !== assistantId))
+      }
       const applyToken = (delta) => {
         acc += delta
-        setMessages((prev) => {
-          const next = prev.slice()
-          next[next.length - 1] = { ...next[next.length - 1], content: acc }
-          return next
-        })
+        updateAssistant(acc)
       }
-      try {
-        await ensureDesktopRuntime()
+      const runReply = async () => {
         await streamChat({
           providerId,
           baseUrl: baseUrl || provider.baseUrl,
@@ -1202,11 +1291,7 @@ function App() {
         // the echo. One retry only: a model that echoes twice will not learn.
         if (isEcho(acc, content)) {
           acc = ''
-          setMessages((prev) => {
-            const next = prev.slice()
-            next[next.length - 1] = { ...next[next.length - 1], content: '' }
-            return next
-          })
+          updateAssistant('')
           await streamChat({
             providerId,
             baseUrl: baseUrl || provider.baseUrl,
@@ -1226,25 +1311,31 @@ function App() {
         // must not leave a silent, empty bubble. Say what happened.
         if (!acc.trim() && !controller.signal.aborted) {
           acc = 'I didn\'t get a reply back from the model on that one — say it again and I\'ll take another run at it.'
-          setMessages((prev) => {
-            const next = prev.slice()
-            next[next.length - 1] = { ...next[next.length - 1], content: acc }
-            return next
-          })
+          updateAssistant(acc)
+        }
+      }
+      try {
+        await ensureDesktopRuntime()
+        if (providerId === 'javelinclouddirect' || providerId === 'javelincloud') {
+          await enqueueProviderTask(providerId, runReply, controller.signal)
+        } else {
+          await runReply()
         }
 
-        // Read the finished answer aloud when voice output is on.
-        speakReply(acc)
+        // Read the finished answer aloud when voice output is on. With several
+        // replies in flight, speaking all of them at once would be unusable.
+        if (activeChatsRef.current <= 1) speakReply(acc)
       } catch (err) {
         if (err?.name === 'AbortError') {
-          if (!acc) setMessages(history)
+          if (!acc) removeAssistant()
         } else {
-          setError(describeError(err))
-          setMessages(history)
+          const detail = describeError(err)
+          updateAssistant(`⚠️ ${detail}`)
+          if (activeChatsRef.current <= 1) setError(detail)
         }
       } finally {
-        setIsStreaming(false)
-        abortRef.current = null
+        chatAbortsRef.current.delete(controller)
+        finishChatResponse()
         textareaRef.current?.focus()
       }
       return
@@ -1492,7 +1583,7 @@ function App() {
       textareaRef.current?.focus()
     }
   }, [
-    apiKey, baseUrl, autonomy, freeLaneCooldownUntil, input, isBusy, isStreaming, messages, mobileChatOnly, mode, model, provider, providerId,
+    apiKey, baseUrl, autonomy, beginChatResponse, enqueueProviderTask, finishChatResponse, input, isBusy, isStreaming, messages, mobileChatOnly, mode, model, provider, providerId,
     reserveAiUsage, recordAccountTokens, recordRunTokens,
     setMessages, setWorkspaceFiles, syncDesktopChanges, desktopApi, runDesktopCommand, ensureDesktopRuntime,
     // Without this, `send` kept the speakReply from the first render — whose live
@@ -1715,6 +1806,7 @@ function App() {
   /** Stop button: abort the run AND unblock any pending approval wait. */
   const stop = useCallback(() => {
     abortRef.current?.abort()
+    stopChatResponses()
     javelinRef.current?.stop()
     if (approvalResolver.current) {
       approvalResolver.current({ approved: false })
@@ -1727,7 +1819,7 @@ function App() {
     setPhase(null)
     setStatusText('')
     textareaRef.current?.focus()
-  }, [])
+  }, [stopChatResponses])
 
   /** Revert the workspace to a checkpoint. */
   const restoreCheckpoint = useCallback((id) => {
@@ -1884,9 +1976,6 @@ function App() {
   }
 
   const hasMessages = messages.length > 0
-  const freeLaneCooldownSeconds = providerId === 'javelinclouddirect'
-    ? Math.max(0, Math.ceil((freeLaneCooldownUntil - clockNow) / 1000))
-    : 0
   const availableExamples = mobileChatOnly ? EXAMPLES.filter((example) => example.mode === 'chat') : EXAMPLES
   const fileCount = Object.keys(workspaceFiles).length
   const accountBadge = isOwner
@@ -2276,7 +2365,7 @@ function App() {
 
           {messages.map((m, i) => (
             <Message
-              key={m.ts ?? i}
+              key={m.id ?? m.ts ?? i}
               message={m}
               isStreaming={isStreaming && i === messages.length - 1 && m.role === 'assistant'}
             />
@@ -2359,8 +2448,8 @@ function App() {
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={onKeyDown}
               placeholder={
-                freeLaneCooldownSeconds > 0
-                  ? `Free reply ready in ${freeLaneCooldownSeconds}s — or switch provider in Settings`
+                activeChats >= MAX_CONCURRENT_RESPONSES
+                  ? `${MAX_CONCURRENT_RESPONSES} replies are already running — wait for one to finish`
                   : mobileChatOnly || mode === 'chat'
                     ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
                   : mode === 'agent'
@@ -2408,15 +2497,24 @@ function App() {
                 )}
               </div>
             )}
-            {isBusy ? (
-              <Button variant="outline" onClick={stop} className="h-10 shrink-0" title="Stop">
-                <Square className="mr-2 h-4 w-4" />
-                Stop
-              </Button>
-            ) : (
-              <Button onClick={() => send()} disabled={!input.trim() || freeLaneCooldownSeconds > 0} className="h-10 shrink-0">
-                {mobileChatOnly || mode === 'chat' ? <Send className="mr-2 h-4 w-4" /> : mode === 'agent' ? <Zap className="mr-2 h-4 w-4" /> : <Brain className="mr-2 h-4 w-4" />}
-                {mobileChatOnly || mode === 'chat' ? 'Send' : mode === 'agent' ? 'Run' : 'Think'}
+            <Button
+              onClick={() => send()}
+              disabled={!input.trim() || isStreaming || javelin.busy || activeChats >= MAX_CONCURRENT_RESPONSES}
+              className="h-10 shrink-0"
+            >
+              {mobileChatOnly || mode === 'chat' ? <Send className="mr-2 h-4 w-4" /> : mode === 'agent' ? <Zap className="mr-2 h-4 w-4" /> : <Brain className="mr-2 h-4 w-4" />}
+              {mobileChatOnly || mode === 'chat' ? 'Send' : mode === 'agent' ? 'Run' : 'Think'}
+            </Button>
+            {isBusy && (
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={stop}
+                className="h-10 w-10 shrink-0"
+                title="Stop all responses"
+                aria-label="Stop all responses"
+              >
+                <Square className="h-4 w-4" />
               </Button>
             )}
           </div>
@@ -2446,9 +2544,10 @@ function App() {
                 ? 'The agent asks before every file change. You can stop it at any time.'
                 : 'Javelin asks before every change, verifies its work, and never repeats a failed step twice.'}
           </p>
-          {freeLaneCooldownSeconds > 0 && (
-            <p className="mt-1 text-center text-[11px] text-amber-600">
-              Javelin Cloud Direct: next free reply in {freeLaneCooldownSeconds}s. Switch provider in Settings for faster replies.
+          {activeChats > 0 && (
+            <p className="mt-1 text-center text-[11px] text-muted-foreground">
+              {activeChats} {activeChats === 1 ? 'reply' : 'replies'} running
+              {providerId === 'javelinclouddirect' ? ' · free replies are spaced by the provider' : ''}
             </p>
           )}
           {!isOwner && (
