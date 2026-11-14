@@ -56,6 +56,19 @@ export async function streamChat({
   const prepared = history.map((message, index) => {
     if (index !== lastUserIndex) return message
     const prior = history.slice(0, index)
+    if (Array.isArray(message?.content)) {
+      const textPart = message.content.find((part) => part?.type === 'text')
+      if (!textPart || !String(textPart.text ?? '').trim()) return message
+      return {
+        ...message,
+        content: message.content.map((part) => (
+          part === textPart
+            ? { ...part, text: withConversationContext(textPart.text, prior) }
+            : part
+        )),
+      }
+    }
+    if (!String(message?.content ?? '').trim()) return message
     return { ...message, content: withConversationContext(message.content, prior) }
   })
 

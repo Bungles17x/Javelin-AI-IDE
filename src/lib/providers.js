@@ -45,6 +45,7 @@ export const PROVIDERS = {
     keyless: true,
     hosted: true,
     freeTier: true,
+    vision: false,
     installHeader: true,
     models: [
       { id: 'javelin', label: 'Javelin Cloud' },
@@ -72,6 +73,7 @@ export const PROVIDERS = {
     keyless: true,
     hosted: true,
     freeTier: true,
+    vision: false,
     models: [
       { id: 'openai-fast', label: 'Javelin Cloud Direct (fast)' },
       { id: 'openai', label: 'Javelin Cloud Direct' },
@@ -90,6 +92,7 @@ export const PROVIDERS = {
     baseUrl: 'http://127.0.0.1:11434/v1',
     requiresKey: false,
     isJavelinModel: true,
+    vision: false,
     models: [
       { id: 'javelin-coder:latest', label: 'Javelin Coder (local)' },
       { id: 'qwen2.5-coder:7b', label: 'Local Qwen2.5 Coder 7B' },
@@ -120,6 +123,7 @@ export const PROVIDERS = {
     keyless: true,
     hosted: false,
     localServer: true,
+    vision: false,
     models: [
       { id: 'javelin-knowledge', label: 'Javelin Chatting Knowledge (0.5B, local)' },
       { id: 'javelin-coder-1.5b', label: 'Javelin Coder 1.5B (local)' },
@@ -173,6 +177,7 @@ export const PROVIDERS = {
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     requiresKey: true,
     hosted: true,
+    vision: true,
     freeTier: true,
     keyUrl: 'https://aistudio.google.com/app/apikey',
     // Current model ids only: older flash ids answer 404 "no longer available to new
@@ -193,6 +198,7 @@ export const PROVIDERS = {
     baseUrl: 'https://api.openai.com/v1',
     requiresKey: true,
     hosted: true,
+    vision: true,
     models: [
       { id: 'gpt-5-codex', label: 'GPT-5 Codex' },
       { id: 'gpt-4.1', label: 'GPT-4.1' },
@@ -208,6 +214,7 @@ export const PROVIDERS = {
     baseUrl: 'https://api.groq.com/openai/v1',
     requiresKey: true,
     hosted: true,
+    vision: false,
     freeTier: true,
     keyUrl: 'https://console.groq.com/keys',
     models: [
@@ -224,6 +231,7 @@ export const PROVIDERS = {
     baseUrl: 'https://api.together.xyz/v1',
     requiresKey: true,
     hosted: true,
+    vision: false,
     models: [
       { id: 'Qwen/Qwen3-Coder-480B-A35B-Instruct', label: 'Qwen3 Coder 480B' },
       { id: 'deepseek-ai/DeepSeek-V3', label: 'DeepSeek V3' },
@@ -237,6 +245,7 @@ export const PROVIDERS = {
     baseUrl: 'https://openrouter.ai/api/v1',
     requiresKey: true,
     hosted: true,
+    vision: true,
     keyUrl: 'https://openrouter.ai/keys',
     models: [
       { id: 'anthropic/claude-sonnet-4.5', label: 'Claude Sonnet 4.5' },

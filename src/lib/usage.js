@@ -33,11 +33,19 @@ export function estimateTokens(value) {
   return text ? Math.ceil(text.length / 4) : 0
 }
 
+function textForEstimate(content) {
+  if (!Array.isArray(content)) return content
+  return content
+    .filter((part) => part?.type === 'text')
+    .map((part) => part.text)
+    .join('\n')
+}
+
 export function estimateMessageTokens(messages) {
   if (!Array.isArray(messages)) return estimateTokens(messages)
   return messages.reduce((total, message) => {
     if (!message) return total
-    return total + estimateTokens(message.content) + 4
+    return total + estimateTokens(textForEstimate(message.content)) + 4
   }, 0)
 }
 

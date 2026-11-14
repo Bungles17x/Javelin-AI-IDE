@@ -35,7 +35,9 @@ import {
   Sparkles, Send, Square, Trash2, Settings, Sun, Moon, User, Bot, AlertCircle, KeyRound,
   MessageSquare, FolderOpen, Zap, CheckCircle2, XCircle, Brain, Mic, MicOff, Volume2, VolumeX,
   Bug, LifeBuoy, Lock, ShieldCheck, PanelRightClose, Copy, Check, SquarePen,
+  Plus, X, FileText, ImagePlus, Download,
 } from 'lucide-react'
+import { generateImage, imagePromptIssue, imageRequestSubject, isImageRequest } from './lib/imageGeneration'
 
 const STORAGE = {
   apiKey: 'javelin.apiKey',
@@ -72,6 +74,16 @@ const MAX_CONCURRENT_RESPONSES = 100
 // The keyless upstream accepts one reply at a time and spaces starts. The queue
 // below honors that in the background; it never disables the composer.
 const FREE_LANE_GAP_MS = 30_000
+const MAX_ATTACHMENTS = 4
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+const MAX_FILE_TEXT_CHARS = 20_000
+const TEXT_FILE_EXTENSIONS = new Set([
+  'txt', 'text', 'md', 'markdown', 'csv', 'tsv', 'json', 'jsonl', 'log',
+  'js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx', 'py', 'rb', 'php', 'go', 'rs',
+  'java', 'kt', 'swift', 'c', 'h', 'cc', 'cpp', 'hpp', 'cs', 'sql',
+  'html', 'htm', 'css', 'scss', 'sass', 'less', 'xml', 'svg', 'yaml', 'yml',
+  'toml', 'ini', 'conf', 'sh', 'bash', 'zsh', 'ps1', 'bat', 'env',
+])
 
 let messageCounter = 0
 function nextMessageId() {
@@ -80,6 +92,93 @@ function nextMessageId() {
   }
   messageCounter += 1
   return `msg-${Date.now().toString(36)}-${messageCounter}`
+}
+
+function formatAttachmentSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function fileExtension(name) {
+  return String(name ?? '').split('.').pop()?.toLowerCase() ?? ''
+}
+
+function isTextAttachment(file) {
+  if (String(file?.type || '').startsWith('text/')) return true
+  return TEXT_FILE_EXTENSIONS.has(fileExtension(file?.name))
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}.`))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function prepareImageAttachment(file) {
+  const source = await readFileAsDataUrl(file)
+  const image = new Image()
+  await new Promise((resolve, reject) => {
+    image.onload = resolve
+    image.onerror = () => reject(new Error(`${file.name} is not an image this browser can read.`))
+    image.src = source
+  })
+  const maxEdge = 1280
+  const scale = Math.min(1, maxEdge / Math.max(image.naturalWidth || 1, image.naturalHeight || 1))
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round((image.naturalWidth || 1) * scale))
+  canvas.height = Math.max(1, Math.round((image.naturalHeight || 1) * scale))
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error(`Could not prepare ${file.name}.`)
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, canvas.width, canvas.height)
+  context.drawImage(image, 0, 0, canvas.width, canvas.height)
+  return {
+    id: nextMessageId(),
+    kind: 'image',
+    name: file.name,
+    mime: 'image/jpeg',
+    size: file.size,
+    dataUrl: canvas.toDataURL('image/jpeg', 0.82),
+  }
+}
+
+async function prepareTextAttachment(file) {
+  const text = await file.text()
+  const truncated = text.length > MAX_FILE_TEXT_CHARS
+  return {
+    id: nextMessageId(),
+    kind: 'file',
+    name: file.name,
+    mime: file.type || 'text/plain',
+    size: file.size,
+    text: truncated ? text.slice(0, MAX_FILE_TEXT_CHARS) : text,
+    truncated,
+  }
+}
+
+function messageForApi(message) {
+  const attachments = Array.isArray(message?.attachments) ? message.attachments : []
+  const files = attachments.filter((attachment) => attachment?.kind === 'file' && attachment.text)
+  const images = attachments.filter((attachment) => attachment?.kind === 'image' && attachment.dataUrl)
+  const parts = []
+  if (message?.content) parts.push(String(message.content))
+  for (const file of files) {
+    parts.push(`<attached_file name="${String(file.name).replace(/"/g, '&quot;')}"${file.truncated ? ' truncated="true"' : ''}>\n${file.text}\n</attached_file>`)
+  }
+  const text = parts.join('\n\n').trim()
+  if (!images.length) return { role: message.role, content: text }
+  return {
+    role: message.role,
+    content: [
+      { type: 'text', text: text || 'Please take a look at the attached image.' },
+      ...images.map((image) => ({ type: 'image_url', image_url: { url: image.dataUrl } })),
+    ],
+  }
 }
 
 function abortableDelay(ms, signal) {
@@ -106,6 +205,13 @@ function abortableDelay(ms, signal) {
     signal?.addEventListener?.('abort', onAbort, { once: true })
   })
 }
+
+const IMAGE_EXAMPLES = [
+  { text: 'A quiet cabin in a snowy pine forest at dusk, warm windows', mode: 'image' },
+  { text: 'A geometric fox in a wildflower meadow, flat vector illustration', mode: 'image' },
+  { text: 'A future city skyline at sunset, wide cinematic view', mode: 'image' },
+  { text: 'A hand-drawn botanical pattern of ferns and wildflowers', mode: 'image' },
+]
 
 const EXAMPLES = [
   { text: 'Explain this code and suggest improvements', mode: 'chat' },
@@ -264,6 +370,14 @@ function App() {
   const [autonomy, setAutonomy] = useLocalStorage(STORAGE.autonomy, 'ask')
 
   const [input, setInput] = useState('')
+  const [attachments, setAttachments] = useState([])
+  const [attachmentError, setAttachmentError] = useState('')
+  const [attachmentBusy, setAttachmentBusy] = useState(false)
+  const attachmentInputRef = useRef(null)
+  const [imageMode, setImageMode] = useState(false)
+  const [imageBusy, setImageBusy] = useState(false)
+  const [imageError, setImageError] = useState('')
+  const imageAbortRef = useRef(null)
   // Replies stream into their own bubbles; this is the only shared chat limit.
   const [activeChats, setActiveChats] = useState(0)
   const activeChatsRef = useRef(0)
@@ -289,6 +403,61 @@ function App() {
   const stopBargeInRef = useRef(null)
   const sendRef = useRef(null)
   const suppressAutoResumeRef = useRef(false)
+
+  const removeAttachment = useCallback((id) => {
+    setAttachments((previous) => previous.filter((attachment) => attachment.id !== id))
+    setAttachmentError('')
+  }, [])
+
+  const toggleImageMode = useCallback(() => {
+    if (imageBusy) return
+    if (!imageMode && attachments.length > 0) {
+      setAttachmentError('Remove attachments before creating an image.')
+      return
+    }
+    setImageMode((value) => !value)
+    setImageError('')
+    setAttachmentError('')
+  }, [attachments.length, imageBusy, imageMode])
+
+  const handleAttachmentFiles = useCallback(async (event) => {
+    const files = Array.from(event.target.files || [])
+    event.target.value = ''
+    if (!files.length) return
+    setImageMode(false)
+    setImageError('')
+    setAttachmentError('')
+    setAttachmentBusy(true)
+    try {
+      let next = [...attachments]
+      for (const file of files) {
+        if (next.length >= MAX_ATTACHMENTS) {
+          setAttachmentError(`You can attach up to ${MAX_ATTACHMENTS} items per message.`)
+          break
+        }
+        if (file.size > MAX_ATTACHMENT_BYTES) {
+          setAttachmentError(`${file.name} is larger than ${formatAttachmentSize(MAX_ATTACHMENT_BYTES)}.`)
+          continue
+        }
+        try {
+          if (String(file.type || '').startsWith('image/')) {
+            next.push(await prepareImageAttachment(file))
+          } else if (isTextAttachment(file)) {
+            next.push(await prepareTextAttachment(file))
+          } else {
+            setAttachmentError(`${file.name} is not an image or a text/code file.`)
+          }
+        } catch (error) {
+          setAttachmentError(error?.message || `Could not attach ${file.name}.`)
+        }
+      }
+      setAttachments(next)
+    } finally {
+      setAttachmentBusy(false)
+      textareaRef.current?.focus()
+    }
+  }, [attachments])
+
   // Callbacks created once (dictation, send) read live mode through a ref, so a
   // stale closure can never silently end the loop.
   const liveVoiceRef = useRef(liveVoice)
@@ -859,7 +1028,7 @@ function App() {
   // Hold Javelin behind a ref so `send` stays stable across renders.
   const javelinRef = useRef(javelin)
   javelinRef.current = javelin
-  const isBusy = isStreaming || activeChats > 0 || javelin.busy
+  const isBusy = isStreaming || activeChats > 0 || javelin.busy || imageBusy
 
   const openDesktopProject = useCallback(async () => {
     const snapshot = await desktopApi?.openWorkspace()
@@ -1136,6 +1305,46 @@ function App() {
     finish(spoken)
   }, [liveVoice, speakReplies, speaker, ttsProvider, ttsKey, ttsVoice, voiceURI])
 
+  const generateImageMessage = useCallback(async ({ content, subject, userMsg }) => {
+    const assistantId = nextMessageId()
+    setMessages((previous) => [
+      ...previous,
+      userMsg,
+      {
+        id: assistantId,
+        role: 'assistant',
+        content: '',
+        image: { status: 'loading', prompt: content },
+        ts: Date.now(),
+      },
+    ])
+    setImageBusy(true)
+    setImageError('')
+    const controller = new AbortController()
+    imageAbortRef.current = controller
+    try {
+      const image = await generateImage({ prompt: subject, signal: controller.signal })
+      setMessages((previous) => previous.map((message) => (
+        message.id === assistantId
+          ? {
+              ...message,
+              content: `AI-generated image created from: “${content}”`,
+              image: { status: 'ready', ...image },
+            }
+          : message
+      )))
+    } catch (error) {
+      setMessages((previous) => previous.filter((message) => message.id !== assistantId))
+      if (error?.name === 'AbortError') return
+      setImageError(error?.message || 'Could not create that image. Try a different description.')
+      setInput((current) => (current.trim() ? current : content))
+    } finally {
+      imageAbortRef.current = null
+      setImageBusy(false)
+      textareaRef.current?.focus()
+    }
+  }, [])
+
   const send = useCallback(async (text, forcedMode) => {
     const content = (text ?? input).trim()
     const target = mobileChatOnly ? 'chat' : (forcedMode ?? mode)
@@ -1144,12 +1353,48 @@ function App() {
     // Conversational covers greetings, laughs and reactions ("lol", "you?", "why?"),
     // so those never start a workspace run. A real task verb still does.
     const useJavelinMode = target === 'javelin' && !isConversational(content)
-    if (!content) return
+    const hasAttachments = attachments.length > 0
+    const hasImages = attachments.some((attachment) => attachment.kind === 'image')
+    const imageRequested = mobileChatOnly && !hasAttachments && (imageMode || isImageRequest(content))
+    if (!content && !hasAttachments) return
+    if (imageRequested) {
+      const subject = imageRequestSubject(content)
+      if (!subject) {
+        setImageError('Describe the subject you want in the image.')
+        return
+      }
+      const promptIssue = imagePromptIssue(content)
+      if (promptIssue) {
+        setImageError(promptIssue)
+        return
+      }
+      if (imageBusy || isStreaming || javelinRef.current?.busy) return
+      if (!reserveAiUsage()) return
+      setError(null)
+      setImageError('')
+      setInput('')
+      await generateImageMessage({
+        content,
+        subject,
+        userMsg: {
+          id: nextMessageId(),
+          role: 'user',
+          content,
+          attachments: [],
+          ts: Date.now(),
+        },
+      })
+      return
+    }
+    if (hasImages && provider.vision === false) {
+      setAttachmentError('This model reads text only. Switch to Gemini, OpenAI, or a vision-capable local model in Settings to send images.')
+      return
+    }
     // Agent and Javelin runs are serial. Plain chat replies are independent and can
     // overlap, up to the per-install cap.
     if (useAgent || useJavelinMode) {
       if (isBusy) return
-    } else if (isStreaming || javelinRef.current?.busy) {
+    } else if (isStreaming || javelinRef.current?.busy || imageBusy) {
       return
     } else if (activeChatsRef.current >= MAX_CONCURRENT_RESPONSES) {
       return
@@ -1163,8 +1408,16 @@ function App() {
     setError(null)
     setInput('')
     setRunResult(null)
+    setAttachmentError('')
 
-    const userMsg = { id: nextMessageId(), role: 'user', content, ts: Date.now() }
+    const userMsg = {
+      id: nextMessageId(),
+      role: 'user',
+      content,
+      attachments,
+      ts: Date.now(),
+    }
+    setAttachments([])
 
     // ---- Javelin Core path ------------------------------------------------
     // Javelin runs on its own runtime: phase machine, memory, self-correction.
@@ -1257,6 +1510,16 @@ function App() {
       return
     }
     const history = [...messages, userMsg]
+    // A text-only provider rejects the whole request if an older message still
+    // carries an image part. Keep the conversation text and drop past images.
+    const apiHistory = history.map(messageForApi).map((message) => {
+      if (provider.vision !== false || !Array.isArray(message.content)) return message
+      const text = message.content
+        .filter((part) => part?.type === 'text')
+        .map((part) => part.text)
+        .join('\n\n')
+      return { ...message, content: text }
+    })
 
     if (!useAgent) {
       // ---- Plain chat path (provider-agnostic) ----
@@ -1291,7 +1554,7 @@ function App() {
           baseUrl: baseUrl || provider.baseUrl,
           apiKey,
           model,
-          messages: history.map(({ role, content: c }) => ({ role, content: c })),
+          messages: apiHistory,
           signal: controller.signal,
           onToken: applyToken,
           onUsage: (payload) => recordAccountTokens(tokensForExchange(payload)),
@@ -1309,7 +1572,7 @@ function App() {
             apiKey,
             model,
             messages: [
-              ...history.map(({ role: cRole, content: c }) => ({ role: cRole, content: c })),
+              ...apiHistory,
               { role: 'system', content: ECHO_RETRY_INSTRUCTION },
             ],
             signal: controller.signal,
@@ -1594,7 +1857,7 @@ function App() {
       textareaRef.current?.focus()
     }
   }, [
-    apiKey, baseUrl, autonomy, beginChatResponse, enqueueProviderTask, finishChatResponse, input, isBusy, isStreaming, messages, mobileChatOnly, mode, model, provider, providerId,
+    apiKey, attachments, baseUrl, autonomy, beginChatResponse, enqueueProviderTask, finishChatResponse, generateImageMessage, imageBusy, imageMode, input, isBusy, isStreaming, messages, mobileChatOnly, mode, model, provider, providerId,
     reserveAiUsage, recordAccountTokens, recordRunTokens,
     setMessages, setWorkspaceFiles, syncDesktopChanges, desktopApi, runDesktopCommand, ensureDesktopRuntime,
     // Without this, `send` kept the speakReply from the first render — whose live
@@ -1818,6 +2081,7 @@ function App() {
   const stop = useCallback(() => {
     abortRef.current?.abort()
     stopChatResponses()
+    imageAbortRef.current?.abort()
     javelinRef.current?.stop()
     if (approvalResolver.current) {
       approvalResolver.current({ approved: false })
@@ -1987,7 +2251,10 @@ function App() {
   }
 
   const hasMessages = messages.length > 0
+  const pendingImages = attachments.some((attachment) => attachment.kind === 'image')
+  const imageInputUnsupported = pendingImages && provider.vision === false
   const availableExamples = mobileChatOnly ? EXAMPLES.filter((example) => example.mode === 'chat') : EXAMPLES
+  const heroExamples = mobileChatOnly && imageMode ? IMAGE_EXAMPLES : availableExamples
   const examplePreviewCount = mobileChatOnly ? 4 : 6
   const fileCount = Object.keys(workspaceFiles).length
   const accountBadge = isOwner
@@ -2239,7 +2506,7 @@ function App() {
       {/* Conversation */}
       <main className="flex-1 overflow-y-auto">
         <div className="container mx-auto max-w-4xl space-y-4 px-4 py-6">
-          {provider.requiresKey && !apiKey && (
+          {provider.requiresKey && !apiKey && !imageMode && (
             <div className="glass-banner flex items-start gap-3 rounded-xl border-amber-300 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
               <KeyRound className="mt-0.5 h-4 w-4 shrink-0" />
               <div>
@@ -2260,7 +2527,9 @@ function App() {
               <span className="chat-hero-orb"><Bot size={23} /></span>
               <span className="chat-hero-kicker">{mobileChatOnly ? 'JAVELIN CHAT' : 'JAVELIN WORKSPACE'}</span>
               <h2 className="chat-hero-title">{mobileChatOnly
-                ? 'What can I help you with?'
+                ? imageMode
+                  ? 'What should we create?'
+                  : 'What can I help you with?'
                 : mode === 'chat'
                 ? 'What are we building?'
                 : mode === 'agent'
@@ -2268,7 +2537,9 @@ function App() {
                   : 'Give Javelin a task'}</h2>
               <p className="chat-hero-copy">
                 {mobileChatOnly
-                  ? 'Ask anything — questions, ideas, explanations, or a little help thinking it through.'
+                  ? imageMode
+                    ? 'Describe an original scene. I’ll generate an image and save it to your conversation.'
+                    : 'Ask anything — questions, ideas, explanations, or a little help thinking it through.'
                   : mode === 'chat'
                   ? 'Ask for explanations or advice. Direct requests to create or change project files automatically use Agent.'
                   : mode === 'agent'
@@ -2281,7 +2552,7 @@ function App() {
                 <span><Brain size={12} /> Local reasoning memory</span>
               </div>}
               <div className="example-grid">
-                {availableExamples.slice(0, showAllExamples ? availableExamples.length : examplePreviewCount).map((ex) => (
+                {heroExamples.slice(0, showAllExamples ? heroExamples.length : examplePreviewCount).map((ex) => (
                   <button
                     key={ex.text}
                     className="example-card"
@@ -2289,13 +2560,13 @@ function App() {
                     onClick={() => send(ex.text, ex.mode)}
                   >
                     <span>{ex.text}</span>
-                    <small>{ex.mode === 'chat' ? 'Ask' : ex.mode === 'agent' ? 'Agent' : 'Javelin'}</small>
+                    <small>{ex.mode === 'image' ? 'Image' : ex.mode === 'chat' ? 'Ask' : ex.mode === 'agent' ? 'Agent' : 'Javelin'}</small>
                   </button>
                 ))}
               </div>
-              {availableExamples.length > examplePreviewCount && (
+              {heroExamples.length > examplePreviewCount && (
                 <button className="example-more" type="button" onClick={() => setShowAllExamples((open) => !open)}>
-                  {showAllExamples ? 'Show fewer ideas' : `More ideas (${availableExamples.length - examplePreviewCount})`}
+                  {showAllExamples ? 'Show fewer ideas' : `More ideas (${heroExamples.length - examplePreviewCount})`}
                 </button>
               )}
 
@@ -2465,17 +2736,103 @@ function App() {
       {/* Composer */}
       <footer className="app-footer border-t">
         <div className="container mx-auto max-w-4xl px-4 py-3">
+          {attachments.length > 0 && (
+            <div className="composer-attachments" aria-label="Attachments">
+              {attachments.map((attachment) => (
+                attachment.kind === 'image' ? (
+                  <div className="composer-attachment" key={attachment.id}>
+                    <img src={attachment.dataUrl} alt={attachment.name} title={attachment.name} />
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(attachment.id)}
+                      aria-label={`Remove ${attachment.name}`}
+                      title={`Remove ${attachment.name}`}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="composer-file" key={attachment.id} title={attachment.name}>
+                    <FileText size={14} />
+                    <span>{attachment.name}</span>
+                    <small>{formatAttachmentSize(attachment.size)}</small>
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(attachment.id)}
+                      aria-label={`Remove ${attachment.name}`}
+                      title={`Remove ${attachment.name}`}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                )
+              ))}
+            </div>
+          )}
+          {attachments.length > 0 && !imageMode && (
+            <p className="attachment-rights-note">Only attach files and images you have the right to use.</p>
+          )}
+          {imageError && (
+            <div className="attachment-notice is-warning" role="status">
+              <span>{imageError}</span>
+            </div>
+          )}
+          {!imageMode && (attachmentError || imageInputUnsupported) && (
+            <div className={`attachment-notice${imageInputUnsupported ? ' is-warning' : ''}`}>
+              {imageInputUnsupported ? (
+                <button type="button" onClick={() => setSettingsOpen(true)}>
+                  This model reads text only. Tap to choose a vision model for images.
+                </button>
+              ) : (
+                <span>{attachmentError}</span>
+              )}
+            </div>
+          )}
+          {imageMode && (
+            <p className="image-mode-note">
+              Original images only. Prompts are screened for known characters, brands, artists and real people.
+            </p>
+          )}
           <div className="composer-row flex items-end gap-2">
+            {mobileChatOnly && !imageMode && (
+              <>
+                <input
+                  ref={attachmentInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  accept="image/*,text/*,.md,.markdown,.csv,.tsv,.json,.jsonl,.log,.js,.jsx,.mjs,.cjs,.ts,.tsx,.py,.rb,.php,.go,.rs,.java,.kt,.swift,.c,.h,.cc,.cpp,.hpp,.cs,.sql,.html,.htm,.css,.scss,.sass,.less,.xml,.svg,.yaml,.yml,.toml,.ini,.conf,.sh,.bash,.zsh,.ps1,.bat,.env"
+                  onChange={handleAttachmentFiles}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="composer-attach"
+                  onClick={() => attachmentInputRef.current?.click()}
+                  disabled={attachmentBusy || attachments.length >= MAX_ATTACHMENTS}
+                  aria-label="Add image or file"
+                  title="Add image or file"
+                >
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </>
+            )}
             <Textarea
               ref={textareaRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value)
+                if (imageError) setImageError('')
+              }}
               onKeyDown={onKeyDown}
               placeholder={
                 activeChats >= MAX_CONCURRENT_RESPONSES
                   ? `${MAX_CONCURRENT_RESPONSES} replies are already running — wait for one to finish`
+                  : imageMode
+                    ? 'Describe an original image'
                   : mobileChatOnly
-                    ? 'Ask anything'
+                    ? (attachments.length > 0 ? 'Add a message' : 'Ask anything')
                   : mode === 'chat'
                     ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
                   : mode === 'agent'
@@ -2525,12 +2882,12 @@ function App() {
             )}
             <Button
               onClick={() => send()}
-              disabled={!input.trim() || isStreaming || javelin.busy || activeChats >= MAX_CONCURRENT_RESPONSES}
+              disabled={(!input.trim() && attachments.length === 0) || attachmentBusy || imageBusy || (!imageMode && imageInputUnsupported) || isStreaming || javelin.busy || activeChats >= MAX_CONCURRENT_RESPONSES}
               className="composer-send h-10 shrink-0"
             >
-              {mobileChatOnly || mode === 'chat' ? <Send className="mr-2 h-4 w-4" /> : mode === 'agent' ? <Zap className="mr-2 h-4 w-4" /> : <Brain className="mr-2 h-4 w-4" />}
+              {imageMode ? <ImagePlus className="mr-2 h-4 w-4" /> : mobileChatOnly || mode === 'chat' ? <Send className="mr-2 h-4 w-4" /> : mode === 'agent' ? <Zap className="mr-2 h-4 w-4" /> : <Brain className="mr-2 h-4 w-4" />}
               <span className="composer-send-label">
-                {mobileChatOnly || mode === 'chat' ? 'Send' : mode === 'agent' ? 'Run' : 'Think'}
+                {imageMode ? 'Create' : mobileChatOnly || mode === 'chat' ? 'Send' : mode === 'agent' ? 'Run' : 'Think'}
               </span>
             </Button>
             {isBusy && (
@@ -2547,6 +2904,19 @@ function App() {
             )}
           </div>
           <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
+            {mobileChatOnly && (
+              <Button
+                variant={imageMode ? 'default' : 'ghost'}
+                size="sm"
+                className={`image-mode-chip h-6 px-2 text-[11px]${imageMode ? ' is-on' : ''}`}
+                onClick={toggleImageMode}
+                disabled={imageBusy}
+                title={attachments.length > 0 ? 'Remove attachments to create an image' : 'Create an original image from a description'}
+              >
+                <ImagePlus className="h-3 w-3" />
+                {imageMode ? 'Image mode on' : 'Create image'}
+              </Button>
+            )}
             {voiceCaps.speak && (
               <Button
                 variant={liveVoice ? 'default' : 'ghost'}
@@ -2567,7 +2937,9 @@ function App() {
           </div>
           <p className="mt-2 text-center text-xs text-muted-foreground">
             {mobileChatOnly
-              ? 'Javelin can make mistakes. Check important info.'
+              ? imageMode
+                ? 'AI images: screened prompts only. Results can still resemble existing work; do not use them as a logo or trademark.'
+                : 'Javelin can make mistakes. Check important info.'
               : mode === 'chat'
               ? 'Responses are generated by an LLM and may be wrong. Verify before shipping.'
               : mode === 'agent'
@@ -2721,6 +3093,61 @@ function ModeTab({ active, onClick, icon: Icon, label, disabled = false }) {
   )
 }
 
+function GeneratedImage({ image }) {
+  if (!image?.dataUrl) return null
+  return (
+    <figure className="generated-image">
+      <a href={image.dataUrl} target="_blank" rel="noreferrer" title={image.prompt}>
+        <img src={image.dataUrl} alt={image.prompt || 'AI-generated image'} />
+      </a>
+      <figcaption className="generated-caption">
+        <span>
+          <ShieldCheck size={13} /> AI-generated · screened prompt
+        </span>
+        <a
+          className="generated-download"
+          href={image.dataUrl}
+          download={`javelin-ai-${image.seed || Date.now()}.${image.mime === 'image/png' ? 'png' : 'jpg'}`}
+        >
+          <Download size={13} /> Save
+        </a>
+      </figcaption>
+      <p className="generated-disclaimer">
+        Screened for known characters, brands, artists and real people. AI images can still resemble
+        existing work — check before commercial use. Generated via Pollinations.
+      </p>
+    </figure>
+  )
+}
+
+function MessageAttachments({ attachments }) {
+  if (!Array.isArray(attachments) || attachments.length === 0) return null
+  return (
+    <div className="msg-attachments">
+      {attachments.map((attachment) => (
+        attachment.kind === 'image' ? (
+          <a
+            key={attachment.id}
+            className="msg-image-link"
+            href={attachment.dataUrl}
+            target="_blank"
+            rel="noreferrer"
+            title={attachment.name}
+          >
+            <img className="msg-image" src={attachment.dataUrl} alt={attachment.name} />
+          </a>
+        ) : (
+          <span className="msg-file" key={attachment.id} title={attachment.name}>
+            <FileText size={14} />
+            <span className="msg-file-name">{attachment.name}</span>
+            <small>{formatAttachmentSize(attachment.size)}</small>
+          </span>
+        )
+      ))}
+    </div>
+  )
+}
+
 function Message({ message, isStreaming }) {
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
@@ -2757,7 +3184,20 @@ function Message({ message, isStreaming }) {
         }`}
       >
         {isUser ? (
-          <p className="whitespace-pre-wrap text-sm">{message.content}</p>
+          <>
+            <MessageAttachments attachments={message.attachments} />
+            {message.content && <p className="whitespace-pre-wrap text-sm">{message.content}</p>}
+          </>
+        ) : message.image?.status === 'loading' ? (
+          <span className="generated-loading">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+            Creating an original image…
+          </span>
+        ) : message.image?.status === 'ready' ? (
+          <>
+            <GeneratedImage image={message.image} />
+            {message.content && <Markdown>{message.content}</Markdown>}
+          </>
         ) : message.content ? (
           <Markdown>{message.content}</Markdown>
         ) : (
