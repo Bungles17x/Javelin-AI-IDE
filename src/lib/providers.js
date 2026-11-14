@@ -315,6 +315,12 @@ export async function streamCompletion({
   // still a local model and must not demand a key. A local provider can never be
   // pointed at a remote service by accident.
   const hosted = Boolean(provider.hosted) && !isLocalOllamaEndpoint(endpoint)
+  let endpointProtocol = ''
+  try {
+    endpointProtocol = new URL(endpoint).protocol
+  } catch {
+    endpointProtocol = ''
+  }
   if (hosted) {
     if (!apiKey && !provider.keyless) {
       throw codeError(
@@ -322,20 +328,33 @@ export async function streamCompletion({
         ERROR_CODES.MODEL_AUTH,
       )
     }
-    let protocol = ''
-    try {
-      protocol = new URL(endpoint).protocol
-    } catch {
-      protocol = ''
-    }
-    if (protocol !== 'https:' && !isLocalOllamaEndpoint(endpoint)) {
+    if (endpointProtocol !== 'https:' && !isLocalOllamaEndpoint(endpoint)) {
       throw codeError(new Error(`Hosted model endpoints must use https: ${endpoint}`), ERROR_CODES.MODEL_CONFIG)
     }
   } else if (!isLocalOllamaEndpoint(endpoint) && !isLoopbackEndpoint(endpoint)) {
-    throw codeError(
-      new Error('Javelin only connects to a server on this computer (localhost). Remote AI endpoints are disabled.'),
-      ERROR_CODES.MODEL_CONFIG,
-    )
+    // Ollama and Javelin's own local server can run on another machine on the same
+    // network. Only the explicitly selected local providers get this exception;
+    // they never receive an API key. Browsers still enforce mixed-content rules.
+    const remoteLocalServer = providerId === 'javelin' || providerId === 'local' || providerId === 'javelinlocal'
+    if (!remoteLocalServer) {
+      throw codeError(
+        new Error('Javelin only connects to a server on this computer (localhost). Remote AI endpoints are disabled.'),
+        ERROR_CODES.MODEL_CONFIG,
+      )
+    }
+    if (
+      endpointProtocol === 'http:' &&
+      typeof window !== 'undefined' &&
+      window.location?.protocol === 'https:'
+    ) {
+      throw codeError(
+        new Error(
+          `This HTTPS page cannot call the plain-HTTP endpoint ${endpoint}. Use an HTTPS tunnel for Ollama, ` +
+          'or open the app from a local HTTP address. Hosted providers work without Ollama.',
+        ),
+        ERROR_CODES.MODEL_CONFIG,
+      )
+    }
   }
   const url = `${endpoint}/chat/completions`
 
@@ -380,7 +399,7 @@ export async function streamCompletion({
             ? `Could not reach ${provider.label ?? providerId} at ${endpoint}. Check the endpoint and your network connection.`
             : provider.localServer
               ? `Could not reach your own model server at ${endpoint}. Start it with "npm run serve:knowledge" — it serves Javelin Chatting Knowledge and Javelin Coder 1.5B — then try again.`
-              : `Could not reach local Ollama at ${endpoint}. Start Ollama and confirm it is listening on port 11434. ${provider.help}`,
+              : `Could not reach Ollama at ${endpoint}. Start Ollama, confirm it is listening on port 11434, and make sure this device can reach that address. ${provider.help}`,
       ),
       ERROR_CODES.MODEL_UNREACHABLE,
     )

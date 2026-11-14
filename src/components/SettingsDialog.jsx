@@ -7,6 +7,7 @@ import { TTS_PROVIDERS, voicesFor, isCloudVoice } from '../lib/cloudTts'
 export function SettingsDialog({
   open, onClose, providerId, apiKey, baseUrl, model, providerEndpoints = {}, onSave,
   ttsProvider = 'system', ttsKey = '', ttsVoice = '',
+  isMobile = false,
 }) {
   const [draftProvider, setDraftProvider] = useState(providerId)
   const [draftKey, setDraftKey] = useState(apiKey)
@@ -104,7 +105,10 @@ export function SettingsDialog({
               onChange={(e) => {
                 const nextProvider = e.target.value
                 setDraftProvider(nextProvider)
-                setDraftBase(providerEndpoints[nextProvider] ?? '')
+                const defaultEndpoint = nextProvider === 'javelin' || nextProvider === 'javelinlocal'
+                  ? PROVIDERS[nextProvider].baseUrl
+                  : ''
+                setDraftBase(providerEndpoints[nextProvider] ?? defaultEndpoint)
               }}
               className="flex h-10 w-full rounded-md border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
@@ -117,12 +121,12 @@ export function SettingsDialog({
               <div className="mt-2 flex items-center gap-2">
                 <Button variant="outline" size="sm" type="button" onClick={checkLocal} className="h-7 text-xs">
                   <Cpu className="mr-1.5 h-3 w-3" />
-                  Check local runtime
+                  Check server
                 </Button>
                 {probe?.checking && <span className="text-xs text-muted-foreground">Checking…</span>}
                 {probe && !probe.checking && (
                   <span className={`text-xs ${probe.ok ? 'text-emerald-600' : 'text-amber-600'}`}>
-                    {probe.ok ? `Running — ${probe.count} model(s) available` : 'Not reachable — start Ollama first'}
+                    {probe.ok ? `Running — ${probe.count} model(s) available` : 'Not reachable — check the endpoint'}
                   </span>
                 )}
               </div>
@@ -144,7 +148,7 @@ export function SettingsDialog({
             )}
           </div>
 
-          {(draftProvider === 'custom' || draftProvider === 'local' || draftProvider === 'replicate' || draftProvider === 'together' || draftProvider === 'anyscale' || draftProvider === 'javelinhosted') && (
+          {(draftProvider === 'custom' || draftProvider === 'local' || draftProvider === 'javelin' || draftProvider === 'javelinlocal' || draftProvider === 'replicate' || draftProvider === 'together' || draftProvider === 'anyscale' || draftProvider === 'javelinhosted') && (
             <div>
               <label htmlFor="base-url" className="mb-1.5 block text-sm font-medium">
                 Endpoint base URL
@@ -163,8 +167,18 @@ export function SettingsDialog({
               <p className="mt-1.5 text-xs text-muted-foreground">
                 {draftProvider === 'javelinhosted'
                   ? 'Required. The https URL of the server running your merged model.'
-                  : 'Leave blank to use the provider default.'}
+                  : draftProvider === 'javelin' || draftProvider === 'javelinlocal'
+                    ? 'Leave blank for the default local address. On a phone, use a reachable address for this server.'
+                    : 'Leave blank to use the provider default.'}
               </p>
+              {isMobile && (draftProvider === 'javelin' || draftProvider === 'javelinlocal') && (
+                <div className="mt-2 rounded-lg border border-amber-300/60 bg-amber-50/70 p-2.5 text-[11px] leading-relaxed text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-100">
+                  A phone cannot reach <code>127.0.0.1</code> on your computer. Enter the computer's LAN address, such as{' '}
+                  <code>http://192.168.1.20:11434/v1</code>, and allow Javelin's origin in Ollama's{' '}
+                  <code>OLLAMA_ORIGINS</code>. On an HTTPS page, browsers block plain HTTP endpoints: use an HTTPS tunnel,
+                  or open this app from a local HTTP address. Hosted providers work without Ollama.
+                </div>
+              )}
             </div>
           )}
 

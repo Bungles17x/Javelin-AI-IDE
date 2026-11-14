@@ -145,13 +145,24 @@ function App() {
   const desktopApi = window.javelinDesktop ?? null
   const mobileViewport = useMobileChatViewport()
   const mobileChatOnly = !desktopApi && mobileViewport
-  const [providerId, setProviderId] = useLocalStorage(STORAGE.provider, DEFAULT_CLOUD_PROVIDER)
+  // Phones use the keyless hosted model by default. Every provider, including
+  // Ollama, remains selectable in Settings.
+  const mobileDefaultProvider = 'javelincloud'
+  const [providerId, setProviderId] = useLocalStorage(
+    STORAGE.provider,
+    mobileChatOnly ? mobileDefaultProvider : DEFAULT_CLOUD_PROVIDER,
+  )
   const [apiKey, setApiKey] = useLocalStorage(STORAGE.apiKey, '')
   const [legacyBaseUrl] = useLocalStorage(STORAGE.baseUrl, '')
   const [providerEndpoints, setProviderEndpoints] = useLocalStorage(STORAGE.providerEndpoints, {})
-  const baseUrl = providerId === 'javelin'
-    ? PROVIDERS.javelin.baseUrl
-    : providerEndpoints[providerId] ?? (providerId === 'custom' ? legacyBaseUrl : '')
+  const savedBaseUrl = String(providerEndpoints[providerId] ?? '').trim()
+  const baseUrl = savedBaseUrl || (
+    providerId === 'javelin' || providerId === 'javelinlocal'
+      ? PROVIDERS[providerId].baseUrl
+      : providerId === 'custom'
+        ? legacyBaseUrl
+        : ''
+  )
   const [model, setModel] = useLocalStorage(STORAGE.model, PROVIDERS[DEFAULT_CLOUD_PROVIDER].defaultModel)
   const [theme, setTheme] = useLocalStorage(
     STORAGE.theme,
@@ -172,6 +183,24 @@ function App() {
     if (mobileChatOnly && mode !== 'chat') setMode('chat')
     document.title = mobileChatOnly ? 'Javelin AI Chat' : 'Javelin AI IDE'
   }, [mobileChatOnly, mode, setMode])
+
+  // A phone that previously opened the web app may still have the old Gemini
+  // default and no key. Move it to the keyless Javelin Cloud provider once.
+  useEffect(() => {
+    if (!mobileChatOnly || providerId !== DEFAULT_CLOUD_PROVIDER || apiKey) return
+    setProviderId(mobileDefaultProvider)
+    setModel(PROVIDERS[mobileDefaultProvider].defaultModel)
+    setMessages((previous) => [
+      ...previous,
+      {
+        role: 'system',
+        content: 'Javelin Cloud is ready on mobile — no API key or Ollama needed. All providers are still available in Settings.',
+        ts: Date.now(),
+      },
+    ])
+    // Deliberately once when a phone has no configured key.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mobileChatOnly])
   const [cloudDefaultApplied, setCloudDefaultApplied] = useLocalStorage(STORAGE.cloudDefault, false)
   const [showAllExamples, setShowAllExamples] = useState(false)
   const [workspaceFiles, setWorkspaceFiles] = useLocalStorage(STORAGE.workspace, {})
@@ -578,6 +607,8 @@ function App() {
   useEffect(() => {
     if (cloudDefaultApplied) return
     setCloudDefaultApplied(true)
+    // Mobile's keyless default is handled above; never move a phone to Gemini.
+    if (mobileChatOnly) return
     // Still on the local default, or on the hosted service that is not activated yet:
     // land on the cloud provider that works right now.
     // Each new default bumps this key so an earlier default cannot strand the app on a
@@ -2454,6 +2485,7 @@ function App() {
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
+        isMobile={mobileChatOnly}
         providerId={providerId}
         apiKey={apiKey}
         baseUrl={baseUrl}
