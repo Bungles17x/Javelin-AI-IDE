@@ -58,13 +58,14 @@ const COPYRIGHT_PATTERNS = [
   /\b(?:photo|photograph|portrait) of (?:me|my|a real)\b/i,
 ]
 
-const NEGATIVE_PROMPT = [
-  'logo', 'trademark', 'brand name', 'copyrighted character', 'existing character',
-  'celebrity', 'real person likeness', 'text', 'watermark', 'signature',
-].join(', ')
-
 const IMAGE_REQUEST_PREFIX = /^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:create|generate|make|draw|paint|render|design|illustrate|sketch)\s+(?:me\s+)?(?:an?|some|the)?\s*(?:image|picture|illustration|drawing|artwork|visual)\b\s*(?:(?:of|showing|with|that|depicting)\s+|$)/i
 const DRAW_REQUEST_PREFIX = /^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:draw|paint|illustrate|sketch)\s+(?:me\s+)?(?:an?|the)?\s*/i
+// Image mode is also entered by typing a plain instruction such as "Make a city".
+// Strip the verb there too, otherwise the image model receives a command instead of
+// the subject it is meant to draw.
+const IMAGE_MODE_PREFIX = /^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+)?(?:create|generate|make|draw|paint|render|design|illustrate|sketch)\s+(?:me\s+)?(?:an?|the)?\s*/i
+
+const PERSON_TERMS = /\b(?:person|people|human|man|woman|boy|girl|child|kid|portrait|face|selfie|character|knight|soldier|warrior|crowd|family|couple|superhero|mascot)\b/i
 
 /** True for requests such as "draw a lighthouse" or "create an image of a fox". */
 export function isImageRequest(prompt) {
@@ -81,7 +82,10 @@ export function imageRequestSubject(prompt) {
   const text = String(prompt ?? '').trim()
   const withoutImagePrefix = text.replace(IMAGE_REQUEST_PREFIX, '').trim()
   if (withoutImagePrefix !== text) return withoutImagePrefix
-  return text.replace(DRAW_REQUEST_PREFIX, '').trim()
+  const withoutDrawPrefix = text.replace(DRAW_REQUEST_PREFIX, '').trim()
+  if (withoutDrawPrefix !== text) return withoutDrawPrefix
+  const withoutCommand = text.replace(IMAGE_MODE_PREFIX, '').trim()
+  return withoutCommand || text
 }
 
 function normalisePrompt(value) {
@@ -121,12 +125,26 @@ export function imagePromptIssue(prompt) {
 
 /** The screened prompt that is actually sent to the image model. */
 export function buildImagePrompt(prompt) {
+  const subject = String(prompt ?? '').trim().replace(/[.!?]+$/, '')
+  // Subject first. A generic "character design" suffix biased a previous prompt for
+  // "Make a city" toward a portrait, so the originality wording stays neutral.
   return [
-    'An entirely original image.',
-    String(prompt ?? '').trim(),
-    'Original character design and generic setting.',
+    `${subject}.`,
+    'Original composition with a generic setting.',
     'No text, no logos, no brand marks, no trademarks, no recognizable copyrighted characters, no real person likeness.',
   ].join(' ')
+}
+
+/** Keep a portrait out of a non-portrait request without blocking people when asked. */
+export function buildNegativePrompt(prompt) {
+  const base = [
+    'logo', 'trademark', 'brand name', 'copyrighted character', 'existing character',
+    'celebrity', 'real person likeness', 'text', 'watermark', 'signature',
+  ]
+  if (!PERSON_TERMS.test(String(prompt ?? ''))) {
+    base.push('person', 'portrait', 'face', 'human', 'character')
+  }
+  return base.join(', ')
 }
 
 function randomSeed() {
@@ -156,7 +174,7 @@ export async function generateImage({ prompt, signal }) {
     safe: 'true',
     nologo: 'true',
     private: 'true',
-    negative_prompt: NEGATIVE_PROMPT,
+    negative_prompt: buildNegativePrompt(prompt),
   })
   const url = `${IMAGE_ENDPOINT}${encodeURIComponent(buildImagePrompt(prompt))}?${params.toString()}`
   const controller = new AbortController()
