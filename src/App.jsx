@@ -34,7 +34,7 @@ import { createBargeIn } from './lib/bargeIn'
 import {
   Sparkles, Send, Square, Trash2, Settings, Sun, Moon, User, Bot, AlertCircle, KeyRound,
   MessageSquare, FolderOpen, Zap, CheckCircle2, XCircle, Brain, Mic, MicOff, Volume2, VolumeX,
-  Bug, LifeBuoy, Lock, ShieldCheck, PanelRightClose,
+  Bug, LifeBuoy, Lock, ShieldCheck, PanelRightClose, Copy, Check, SquarePen,
 } from 'lucide-react'
 
 const STORAGE = {
@@ -1001,6 +1001,17 @@ function App() {
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark')
   }, [theme])
+
+  // The phone composer grows with a long question, like a chat app, instead of
+  // trapping the text behind an inner scrollbar after the first line.
+  useEffect(() => {
+    if (!mobileChatOnly) return
+    const field = textareaRef.current
+    if (!field) return
+    field.style.height = 'auto'
+    const limit = Math.max(42, window.innerHeight * 0.28)
+    field.style.height = `${Math.min(field.scrollHeight, limit)}px`
+  }, [input, mobileChatOnly])
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -1977,6 +1988,7 @@ function App() {
 
   const hasMessages = messages.length > 0
   const availableExamples = mobileChatOnly ? EXAMPLES.filter((example) => example.mode === 'chat') : EXAMPLES
+  const examplePreviewCount = mobileChatOnly ? 4 : 6
   const fileCount = Object.keys(workspaceFiles).length
   const accountBadge = isOwner
     ? 'Owner'
@@ -2069,9 +2081,21 @@ function App() {
             <span className="brand-emblem"><Sparkles size={14} /></span>
             <div className="brand-copy">
               <h1 className="bg-gradient-to-r from-primary to-blue-600 bg-clip-text text-xl font-bold text-transparent">
-                Javelin AI
+                {mobileChatOnly ? 'Javelin' : 'Javelin AI'}
               </h1>
-              <span className="brand-tagline">{mobileChatOnly ? 'MOBILE CHAT' : 'LOCAL-FIRST CODING INTELLIGENCE'}</span>
+              {mobileChatOnly ? (
+                <button
+                  type="button"
+                  className="brand-tagline brand-model-button"
+                  onClick={() => setSettingsOpen(true)}
+                  title={`${provider.label} · ${currentModel} — change model`}
+                  aria-label="Change model"
+                >
+                  {currentModel}
+                </button>
+              ) : (
+                <span className="brand-tagline">LOCAL-FIRST CODING INTELLIGENCE</span>
+              )}
             </div>
             <span className="glass-chip ml-2 hidden px-2 py-0.5 text-xs text-muted-foreground sm:inline">
               {provider.label} · {currentModel}
@@ -2143,10 +2167,10 @@ function App() {
               size="icon"
               onClick={clear}
               disabled={!hasMessages || isBusy}
-              aria-label="Clear conversation"
-              title="Clear conversation"
+              aria-label={mobileChatOnly ? 'New chat' : 'Clear conversation'}
+              title={mobileChatOnly ? 'New chat' : 'Clear conversation'}
             >
-              <Trash2 className="h-4 w-4" />
+              {mobileChatOnly ? <SquarePen className="h-4 w-4" /> : <Trash2 className="h-4 w-4" />}
             </Button>
             <Button
               variant="ghost"
@@ -2236,7 +2260,7 @@ function App() {
               <span className="chat-hero-orb"><Bot size={23} /></span>
               <span className="chat-hero-kicker">{mobileChatOnly ? 'JAVELIN CHAT' : 'JAVELIN WORKSPACE'}</span>
               <h2 className="chat-hero-title">{mobileChatOnly
-                ? 'Ask Javelin anything'
+                ? 'What can I help you with?'
                 : mode === 'chat'
                 ? 'What are we building?'
                 : mode === 'agent'
@@ -2244,7 +2268,7 @@ function App() {
                   : 'Give Javelin a task'}</h2>
               <p className="chat-hero-copy">
                 {mobileChatOnly
-                  ? 'Chat from your phone. Ask questions, get explanations, and talk through ideas — no code editing or workspace tools.'
+                  ? 'Ask anything — questions, ideas, explanations, or a little help thinking it through.'
                   : mode === 'chat'
                   ? 'Ask for explanations or advice. Direct requests to create or change project files automatically use Agent.'
                   : mode === 'agent'
@@ -2257,7 +2281,7 @@ function App() {
                 <span><Brain size={12} /> Local reasoning memory</span>
               </div>}
               <div className="example-grid">
-                {availableExamples.slice(0, showAllExamples ? availableExamples.length : 6).map((ex) => (
+                {availableExamples.slice(0, showAllExamples ? availableExamples.length : examplePreviewCount).map((ex) => (
                   <button
                     key={ex.text}
                     className="example-card"
@@ -2269,9 +2293,9 @@ function App() {
                   </button>
                 ))}
               </div>
-              {availableExamples.length > 6 && (
+              {availableExamples.length > examplePreviewCount && (
                 <button className="example-more" type="button" onClick={() => setShowAllExamples((open) => !open)}>
-                  {showAllExamples ? 'Show fewer ideas' : `More ideas (${availableExamples.length - 6})`}
+                  {showAllExamples ? 'Show fewer ideas' : `More ideas (${availableExamples.length - examplePreviewCount})`}
                 </button>
               )}
 
@@ -2441,7 +2465,7 @@ function App() {
       {/* Composer */}
       <footer className="app-footer border-t">
         <div className="container mx-auto max-w-4xl px-4 py-3">
-          <div className="flex items-end gap-2">
+          <div className="composer-row flex items-end gap-2">
             <Textarea
               ref={textareaRef}
               value={input}
@@ -2450,18 +2474,20 @@ function App() {
               placeholder={
                 activeChats >= MAX_CONCURRENT_RESPONSES
                   ? `${MAX_CONCURRENT_RESPONSES} replies are already running — wait for one to finish`
-                  : mobileChatOnly || mode === 'chat'
+                  : mobileChatOnly
+                    ? 'Ask anything'
+                  : mode === 'chat'
                     ? 'Ask anything... (Enter to send, Shift+Enter for newline)'
                   : mode === 'agent'
                     ? 'Describe the task — the agent will inspect, plan, edit and verify…'
                     : 'Describe the task — Javelin will plan, act, verify and repair its own mistakes…'
               }
-              rows={2}
+              rows={mobileChatOnly ? 1 : 2}
               className="composer-field max-h-48 min-h-[56px] resize-y"
               aria-label="Message"
             />
             {(voiceCaps.speak || voiceCaps.listen) && (
-              <div className="flex shrink-0 flex-col gap-1">
+              <div className="composer-voice flex shrink-0 flex-col gap-1">
                 {voiceCaps.listen && (
                   <Button
                     variant={listening ? 'default' : 'outline'}
@@ -2500,17 +2526,19 @@ function App() {
             <Button
               onClick={() => send()}
               disabled={!input.trim() || isStreaming || javelin.busy || activeChats >= MAX_CONCURRENT_RESPONSES}
-              className="h-10 shrink-0"
+              className="composer-send h-10 shrink-0"
             >
               {mobileChatOnly || mode === 'chat' ? <Send className="mr-2 h-4 w-4" /> : mode === 'agent' ? <Zap className="mr-2 h-4 w-4" /> : <Brain className="mr-2 h-4 w-4" />}
-              {mobileChatOnly || mode === 'chat' ? 'Send' : mode === 'agent' ? 'Run' : 'Think'}
+              <span className="composer-send-label">
+                {mobileChatOnly || mode === 'chat' ? 'Send' : mode === 'agent' ? 'Run' : 'Think'}
+              </span>
             </Button>
             {isBusy && (
               <Button
                 variant="outline"
                 size="icon"
                 onClick={stop}
-                className="h-10 w-10 shrink-0"
+                className="composer-stop h-10 w-10 shrink-0"
                 title="Stop all responses"
                 aria-label="Stop all responses"
               >
@@ -2538,7 +2566,9 @@ function App() {
             {voiceNotice && <span className="text-[11px] text-amber-600">{voiceNotice}</span>}
           </div>
           <p className="mt-2 text-center text-xs text-muted-foreground">
-            {mobileChatOnly || mode === 'chat'
+            {mobileChatOnly
+              ? 'Javelin can make mistakes. Check important info.'
+              : mode === 'chat'
               ? 'Responses are generated by an LLM and may be wrong. Verify before shipping.'
               : mode === 'agent'
                 ? 'The agent asks before every file change. You can stop it at any time.'
@@ -2692,6 +2722,7 @@ function ModeTab({ active, onClick, icon: Icon, label, disabled = false }) {
 }
 
 function Message({ message, isStreaming }) {
+  const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
 
   // System notes (reminders, checkpoint restores) render as a centred strip.
@@ -2703,8 +2734,18 @@ function Message({ message, isStreaming }) {
     )
   }
 
+  const copyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+
   return (
-    <div className={`flex gap-3 ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div className={`message-row flex gap-3 ${isUser ? 'justify-end' : 'justify-start'}`}>
       {!isUser && (
         <div className="msg-avatar mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-primary">
           <Bot className="h-4 w-4" />
@@ -2727,6 +2768,14 @@ function Message({ message, isStreaming }) {
         )}
         {isStreaming && message.content && (
           <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-foreground/60 align-text-bottom" />
+        )}
+        {!isUser && message.content && !isStreaming && (
+          <div className="msg-actions">
+            <button type="button" className="msg-copy" onClick={copyMessage} aria-label="Copy reply">
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+              <span>{copied ? 'Copied' : 'Copy'}</span>
+            </button>
+          </div>
         )}
       </div>
       {isUser && (
