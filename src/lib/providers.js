@@ -39,7 +39,7 @@ export const PROVIDERS = {
    */
   javelincloud: {
     id: 'javelincloud',
-    label: 'Javelin Cloud (free, no key)',
+    label: 'Javelin Cloud (server proxy, free)',
     baseUrl: 'https://site-96a7149f3a1b4e329da008e6a95c848e.freebuff.page/v1',
     requiresKey: false,
     keyless: true,
@@ -53,7 +53,33 @@ export const PROVIDERS = {
     defaultModel: 'javelin',
     help:
       'Free Javelin models hosted by Javelin Cloud. No API key and no Ollama: requests go to the hosted service, ' +
-      'which uses one shared free allowance (a daily request limit per machine).',
+      'which uses one shared free allowance (a daily request limit per machine). Its shared upstream can be busy; ' +
+      'choose Javelin Cloud Direct on a phone for the lowest-latency free route.',
+  },
+  /**
+   * The same free model without the Javelin Cloud proxy hop.
+   *
+   * The hosted proxy calls this public keyless service from one Cloudflare egress
+   * address, so all of its users compete for one upstream slot. Calling it from the
+   * user's own device gives each phone/browser its own slot, removes the proxy wait,
+   * and avoids the proxy's 429 when that shared slot is busy.
+   */
+  javelinclouddirect: {
+    id: 'javelinclouddirect',
+    label: 'Javelin Cloud Direct (free, no key)',
+    baseUrl: 'https://text.pollinations.ai/openai',
+    requiresKey: false,
+    keyless: true,
+    hosted: true,
+    freeTier: true,
+    models: [
+      { id: 'openai-fast', label: 'Javelin Cloud Direct (fast)' },
+      { id: 'openai', label: 'Javelin Cloud Direct' },
+    ],
+    defaultModel: 'openai-fast',
+    help:
+      'The free Javelin model called directly from this device. No API key or Ollama needed; ' +
+      'one free reply runs at a time, so wait for the current answer if the service asks you to retry.',
   },
   /**
    * Javelin's self-hosted model served by local Ollama.
