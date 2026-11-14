@@ -1,0 +1,22 @@
+# Baseten / Truss deployment for the merged Javelin model.
+#
+#   pip install --upgrade truss baseten && baseten login
+#   truss push ./cloud-model/baseten --publish
+#
+# Put the merged weights (npm run model:merge) in ./cloud-model/baseten/model/ before
+# pushing, or point MODEL_ID at a Hugging Face repo you control instead.
+model_name: javelin-cloud
+description: Javelin's own fine-tuned model, served as an OpenAI-compatible endpoint.
+
+resources:
+  accelerator: A10G          # 24 GB — comfortable for 7B in bf16
+  cpu: "4"
+  memory: 16Gi
+
+runtime:
+  predict_concurrency: 4
+
+environment_variables:
+  MODEL_ID: /app/model
+  SERVED_NAME: javelin-cloud
+  MAX_MODEL_LEN: "8192"

@@ -3,8 +3,9 @@ An autonomous coding agent that lives in your editor's sidebar. It can inspect y
 workspace, plan changes, edit files behind an approval gate, run your tests, and recover from its
 own failures.
 
-Runs **keyless by default** against a local model (Ollama). Cloud inference (Groq or any
-OpenAI-compatible endpoint) is opt-in.
+Runs against your **self-hosted Javelin model by default** using the local Ollama runtime.
+The extension only offers local providers and blocks remote provider requests; no cloud AI
+API or API key is used.
 
 ## Features
 **Agent mode (new)**
@@ -22,11 +23,21 @@ OpenAI-compatible endpoint) is opt-in.
 - **Streaming responses** with a Stop button
 - **Code blocks with actions** — every fenced block gets **Copy** and **Insert**
 - **Selection-aware** — select code, right-click → *Ask About Selection*
-- **Encrypted key storage** — API keys go into VS Code's `SecretStorage`, not plain-text settings
+- **Local-only inference** — prompts and project context are sent only to Ollama on this machine
 - **Safe rendering** — markdown is escaped, under a strict nonce-based CSP
 - **In-editor theming** — picks up your VS Code theme colors
 
 ## Installation
+
+### One-Click Private Install (Recommended)
+
+Run from the root directory:
+
+```bash
+npm run install:extension
+```
+
+This verifies developer authorization (`lildc`), compiles the extension, packages the private `.vsix`, and installs it directly into your local VS Code instance.
 
 ### From source
 
@@ -40,23 +51,18 @@ Then press **F5** in VS Code to launch an Extension Development Host window, and
 Javelin AI icon in the activity bar.
 
 ## Setup
-**Local, keyless (default).** No API key required:
+**Javelin, self-hosted (default).** No API key required. The extension starts Ollama on
+this machine when needed and uses the installed Javelin model:
 
 ```bash
-ollama pull qwen2.5-coder:7b
+ollama list
 ```
 
-Install [Ollama](https://ollama.com/download), pull a model, and you're done. Model quality and
-speed depend on your hardware — a smaller model is a reasonable trade for staying offline.
-
-**Cloud (optional).** Run **Javelin AI: Select Model Provider** → *Groq*, then
-**Javelin AI: Set API Key** and paste a free key from <https://console.groq.com/keys>. The key is
-stored encrypted in `SecretStorage`, never in your settings file.
-
-**Custom.** Point `javelin.baseUrl` at any OpenAI-compatible `/v1` endpoint (LM Studio, vLLM,
-OpenRouter, your own server) and select the *Custom* provider.
-
-> **Note:** cloud free tiers are rate-limited. On a `429`, wait or switch to a smaller/local model.
+Install [Ollama](https://ollama.com/download) and install the Javelin Coder model using the
+instructions supplied with your model distribution.
+The model runs on your machine; model downloads are only needed once, and inference does not
+send prompts or project files to a hosted AI service. You can choose another Ollama model using
+**Javelin AI: Select Model Provider** and the `javelin.model` setting.
 
 ## Commands
 
@@ -69,18 +75,16 @@ OpenRouter, your own server) and select the *Custom* provider.
 | `Javelin AI: Accept All Changes (keep last run)` | Keep the last run's changes and retire the revert offer |
 | `Javelin AI: Revert to My Last Message (undo chat and files)` | Truncate the conversation back to your last message and restore the files to before it ran |
 | `Javelin AI: Restore Checkpoint…` | Pick a checkpoint and revert the workspace to it |
-| `Javelin AI: Select Model Provider` | Choose local / Groq / custom |
-| `Javelin AI: Set API Key` | Store or clear the cloud API key |
+| `Javelin AI: Select Model Provider` | Choose the self-hosted Javelin model or another local Ollama model |
 | `Javelin AI: Ask About Selection` | Attach the current selection and ask about it (also on the editor right-click menu) |
 
 ## Settings
 
 | Setting | Default | Description |
 |---|---|---|
-| `javelin.provider` | `local` | Where the model runs: `local`, `groq`, or `custom` |
-| `javelin.baseUrl` | `""` | Endpoint override; blank uses the provider default |
-| `javelin.model` | `qwen2.5-coder:7b` | Model id (an Ollama tag for local models) |
-| `javelin.groqApiKey` | `""` | Fallback key, used only if no key is in SecretStorage |
+| `javelin.provider` | `javelin` | Self-hosted Javelin or local Ollama; remote providers are disabled |
+| `javelin.baseUrl` | `""` | Local Ollama endpoint override; must remain on localhost port 11434 |
+| `javelin.model` | `javelin-coder:latest` | Installed local Ollama model tag |
 | `javelin.autonomy` | `ask` | How much runs unprompted: `ask` (everything asks), `auto-edit` (edits apply, deleting a file still asks), `full` (edits and deletes run unattended) |
 | `javelin.agentAutoApproveSafeCommands` | `true` | Skip the prompt for test/build/lint. Under `ask`, file edits always ask. |
 | `javelin.agentMaxSteps` | `24` | Step cap before the agent stops and reports back |
@@ -130,8 +134,8 @@ done on success: a retry of a failed action never reads as progress.
 
 ## Honest limits
 
-- **Keyless means local.** A large cloud model cannot run inside a webview; keyless mode runs a
-  local model via Ollama instead.
+- **Inference stays local.** The extension restricts model requests to the local Ollama endpoint;
+  it does not send prompts or project context to cloud AI providers.
 - **This is not a trained frontier model.** The capability comes from the agent scaffolding — tool
   use, the inspect/verify loop, and failure recovery — not from bespoke training.
 - **Review agent output.** Every change is gated, diffed and revertible, but you own what ships.
@@ -167,10 +171,11 @@ vscode-extension/
 
 ## Security
 
-- API keys are stored in VS Code's encrypted `SecretStorage`
+- Inference requests are restricted to Ollama on `localhost:11434`; remote AI endpoints are blocked
+- The extension does not store or send AI API keys
 - The webview runs under `default-src 'none'` with a per-load script nonce
 - All model output is HTML-escaped before rendering, so generated code cannot inject markup
-- The only network call is to `api.groq.com`; no telemetry
+- No telemetry is collected; optional update checks contact GitHub when configured
 
 ## License
 

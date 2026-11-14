@@ -8,6 +8,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Private extension auto-updates.** The VS Code extension checks private GitHub Releases at startup, installs newer VSIX versions, and keeps update credentials in SecretStorage.
 - **Automatic safety checkpoint.** A checkpoint is taken by the runtime *before the
   first tool call* of every run. It does not depend on the agent remembering to ask
   for one, so "revert everything" is always available — even after a run that

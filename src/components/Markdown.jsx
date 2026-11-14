@@ -15,7 +15,7 @@ function CodeBlock({ className, children }) {
   }
 
   return (
-    <div className="group relative my-3 rounded-lg border border-slate-800 bg-slate-950 text-slate-50">
+    <div className="group relative my-3 overflow-hidden rounded-xl border border-white/15 bg-slate-950/90 text-slate-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_14px_30px_-22px_rgba(0,0,0,0.9)] backdrop-blur-xl">
       <div className="flex items-center justify-between border-b border-slate-800 px-3 py-1.5 text-xs text-slate-400">
         <span className="font-mono">{language || 'code'}</span>
         <button
@@ -44,7 +44,7 @@ const components = {
     }
     return (
       <code
-        className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.875em] text-foreground"
+        className="glass-inset rounded-md px-1.5 py-0.5 font-mono text-[0.875em] text-foreground"
         {...props}
       >
         {children}

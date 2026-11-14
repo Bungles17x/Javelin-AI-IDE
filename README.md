@@ -1,31 +1,26 @@
-# Javelin AI - Coding Assistant
-A web + VS Code AI coding agent built with React, TailwindCSS and Vite. Three modes:
+# Javelin AI
 
-- **Chat** — ask questions, get streamed answers.
+Javelin is a self-hosted coding assistant and IDE. Chat, Agent, and Javelin Core run against a model served by Ollama on your own computer; the application does not send prompts or project files to hosted AI APIs.
+
+## What “from scratch” means here
+
+Javelin's IDE, agent runtime, project tools, and local integration are built in this repository. The included JavaScript model/training code is experimental and is **not** a capable coding model: it has not been trained to production quality. Training a useful base model from random weights requires very large datasets and substantial GPU compute. For useful local coding today, Javelin uses the locally installed `javelin-coder` Ollama model. This is local inference, not a hosted API.
+
+## Three Modes
+
+- **Chat** — ask questions, get streamed answers from your local model.
 - **Agent** — give it a task. It inspects, plans, edits behind an approval gate, runs your tests,
   and fixes its own failures.
 - **Javelin** — runs on **Javelin Core**, its own reasoning runtime: an explicit
   understand → plan → act → verify → repair lifecycle with persistent memory, a project index,
-  hypothesis-driven self-correction, and a swappable inference engine underneath.
+  hypothesis-driven self-correction, and the local Javelin model underneath.
   See [docs/JAVELIN-CORE.md](docs/JAVELIN-CORE.md).
 
-> **What "its own AI" means here, precisely.** Javelin owns its *architecture* — the reasoning
-> lifecycle, memory, tools, safety policy and self-repair — which is where most agent capability
-> actually comes from. It does not own the model's weights; no session can train a frontier model.
-> Javelin treats any model (local Ollama, Groq, or your own endpoint) as a swappable engine.
-> This is the same shape as Claude Code, Copilot and Codex.
->
-> **Toward its own model.** A training pipeline is included: capture real Javelin runs, export them
-> into a versioned dataset format, and fine-tune a base model on Javelin's policy (tool use,
-> verify/repair, honesty). The result serves as a Javelin engine with **no runtime changes**.
-> See [docs/TRAINING.md](docs/TRAINING.md) for what fine-tuning can and cannot do, and
-> [docs/MODEL-IDENTITY.md](docs/MODEL-IDENTITY.md) for how Javelin's identity is kept separate
-> from the tools it happens to be given.
->
-> **Training honesty.** `npm run train:status` answers "do I have a trained model?" by checking
-> files on disk, not by trusting a log. A run counts as trained only if the trainer exited 0 and a
-> usable adapter exists. Nothing in this repo has been trained — no Python is installed here, and
-> the runner refuses rather than pretending.
+## Requirements
+
+- Node.js 18+ and npm
+- [Ollama](https://ollama.com/) installed and running locally
+- The `javelin-coder` model available to Ollama (several GB of disk and enough RAM for the selected model)
 
 ## Features
 **Agent mode**
@@ -41,50 +36,92 @@ A web + VS Code AI coding agent built with React, TailwindCSS and Vite. Three mo
 - **Accept or revert a run** — after any run that changed files you choose: **Accept all** or **Revert all**, restoring every changed file (and un-deleting removed ones) exactly as it was
 - **Revert to your last message** — discard your last request *and everything after it*, restoring the files to before it ran. Your wording returns to the input box, so a rephrase is an edit, not a retype
 - **Sees the whole project** — starts from `get_tree`, a nested view of every folder and file, instead of guessing paths one directory at a time
+- **Live workspace updates** — files read by the agent open in the activity view; edits and new files appear in the Explorer/editor while the run is active
+- **Live command output** — project commands stream stdout/stderr into the activity timeline; non-allowlisted commands pause for approval
 - **Task checklist** — a stated plan becomes a live checklist that ticks off as real work succeeds. A retry of a failed action never reads as progress
 - **Stop button** — aborts the run mid-flight and unblocks any pending approval
 - **Verified before "done"** — the agent reports what it actually ran; `finish` carries an
   explicit `verified` flag rather than assuming success
-- **Command policy** — test/build/lint commands run by default; `rm -rf /`, `mkfs` and similar are
-  hard-blocked and can never run
-**Providers**
+- **Command policy** — commands follow the selected autonomy/approval setting; non-allow-listed commands always require approval. Destructive system commands such as `rm -rf /` and `mkfs` are hard-blocked
+- **Bounded large-file diffs** — large edits use a linear-time preview path to avoid quadratic slowdowns while retaining changed lines and exact change counts
+**Self-hosted AI**
 
-- **Local, keyless by default** — runs against [Ollama](https://ollama.com) on your machine. No
-  API key, and your code never leaves the computer
-- **Groq / OpenAI-compatible cloud** — opt-in, pluggable, for when you want a larger model
-- **Custom endpoint** — point at LM Studio, vLLM, OpenRouter, or your own server
+- **Local inference by default** — the default endpoint is Ollama at `127.0.0.1:11434`
+- **No hosted AI APIs** — remote endpoints are rejected by the desktop/web provider
+- **Model stays local** — prompts, project context, and tool results go only to local Ollama
+- **Offline after model installation** — no network access is needed for inference once the model is installed
 **Chat mode**
 
 - Streaming responses, GitHub-flavored markdown, per-block Copy button, dark mode, persistence
 ## Getting Started
+### Standalone Desktop IDE (Windows)
+
+Javelin is available as its own desktop IDE; Visual Studio Code is not required:
+
+```powershell
+npm install
+npm run desktop:dev
+```
+
+In desktop development mode, renderer edits hot-reload through Vite. Changes to
+Electron's `desktop/main.cjs`, `desktop/preload.cjs`, or
+`desktop/textFileTypes.cjs` automatically restart the desktop shell. This
+development watcher does not update an installed production copy; rebuild and
+install that copy with the desktop build workflow.
+
+To build the per-user Windows setup program:
+
+```powershell
+npm run desktop:build
+```
+
+The installer is created in `release/` as `Javelin AI IDE Setup <version>.exe`. The IDE includes a project explorer, Monaco code editor, and the Javelin chat/agent workspace. Open a project folder or create a new workspace from the Explorer; creating one asks you to choose its parent directory and a folder name, so you do not need an existing project. Javelin works only inside the selected workspace, and file changes remain approval-gated. Electron is isolated from the renderer, and filesystem access is limited to the folder selected by the user. Local model runtime and model weights remain separate downloads.
+
 ### Prerequisites
-- Node.js (v18 or higher)
-- npm
-- **For the default keyless local model:** [Ollama](https://ollama.com/download), then:
+- Node.js (v18 or higher) and npm
+- Ollama installed and running
+- Javelin Coder installed in Ollama (`ollama list` should show `javelin-coder:latest`)
 
-  ```bash
-  ollama pull qwen2.5-coder:7b
-  ```
-
-### Installation
+### Install and run
 ```bash
 npm install
 npm run dev
 ```
 
-The dev server runs on `http://localhost:3000`.
+If Ollama does not already contain Javelin Coder, install Ollama and add the model using the model distribution provided with your Javelin build. The application does not silently substitute a cloud provider or train a toy model when the model is missing. The dev server runs on `http://localhost:3000`.
+
+### VS Code Extension (Private Install)
+
+To install the private Javelin AI Assistant extension into your local VS Code:
+
+```bash
+npm run install:extension
+```
+
+This verifies developer authorization (`lildc`), compiles the extension, packages the private `.vsix` archive, and installs it directly into VS Code.
+
+### Windows IDE Installer
+
+Build a distributable Windows setup executable from this checkout:
+
+```powershell
+npm run build:installer
+```
+
+The installer is written to `installer-output/Javelin-AI-IDE-Setup.exe`. It installs the Javelin extension into VS Code, installs the current-user VS Code build if one is not already present, and adds a Javelin AI IDE shortcut. The local model runtime and model weights are not bundled; install Ollama and the Javelin model using the instructions supplied with the model distribution. The VS Code extension starts Ollama on demand. This private build is restricted to the authorized `lildc` account.
 
 ### Configuration
-Open **Settings** (gear icon). Provider defaults to **Local (keyless)** — click *Check local
-runtime* to confirm Ollama is reachable. To use a cloud model instead, pick Groq and paste a free
-key from <https://console.groq.com/keys>, or choose *Custom* and give it a base URL.
+Open **Settings** (gear icon) to select an installed local Ollama model. The default is
+`javelin-coder:latest`. The desktop app discovers installed models at startup; install the
+Javelin model separately if it is missing. No model is silently trained or replaced by a cloud service.
 
 ### Tests
 ```bash
 npm test
 ```
 
-Five suites, all deterministic and GPU-free:
+The automated suites use scripted inference and run without a GPU. They validate orchestration and
+tool behavior, not model quality:
 
 | Suite | Proves |
 |---|---|
@@ -94,14 +131,14 @@ Five suites, all deterministic and GPU-free:
 | `training-pipeline` | traces captured from **real** runs export into valid training data |
 | `trained-model` | a trained model drives the **unmodified** runtime as an engine |
 
-### Training a model
+### Agent training data
 ```bash
 npm run train:dataset                        # build a dataset (seeds)
 npm run train:dataset --traces traces/    # or from captured real runs
 npm run train:prepare --dataset datasets/x   # generate fine-tune config + scripts
 ```
 
-Capturing real runs feeds the pipeline:
+Capturing real runs can export trajectories for research and evaluation:
 
 ```js
 import { createTraceRecorder } from './training/dataset/recorder.js'
@@ -111,7 +148,7 @@ const trajectory = recorder.finish({ status, verified })   // → JDF, train-rea
 ```
 
 The recorder is an **observer** on the existing event stream — it changes nothing in the runtime.
-See [docs/TRAINING.md](docs/TRAINING.md).
+This pipeline does not train a capable language model. See [docs/TRAINING.md](docs/TRAINING.md).
 
 ## Getting Started
 
@@ -119,6 +156,7 @@ See [docs/TRAINING.md](docs/TRAINING.md).
 
 - Node.js (v18 or higher) — required for built-in `fetch` streaming
 - npm
+- Ollama running locally with `javelin-coder:latest` installed
 
 ### Installation
 
@@ -131,17 +169,7 @@ The dev server runs on `http://localhost:3000`.
 
 ### Configuration
 
-Open **Settings** (gear icon, top right) and paste a free Groq API key from
-<https://console.groq.com/keys>. You can also provide it at build time:
-
-```bash
-# .env.local
-VITE_GROQ_API_KEY=gsk_...
-```
-
-> **Note:** the key is sent from the browser directly to Groq and stored in this browser's
-> `localStorage`. That is fine for local/personal use, but for anything public you should proxy
-> the request through your own backend so the key is never exposed to clients.
+Inference uses local Ollama at `127.0.0.1:11434`; it does not call a hosted AI API or require an API key.
 
 ### Building for Production
 
@@ -259,23 +287,75 @@ tests/
 └── run.mjs                      # bundling test runner (npm test)
 
 docs/
+├── ERROR-CODES.md               # every run failure code and what to check
 ├── JAVELIN-CORE.md              # architecture, memory model, honest limits
 └── TRAINING.md                  # dataset format, fine-tune, from-scratch roadmap
 ```
 
 ## How the Agent Loop Works
-Each step the model may call a tool. The loop is in `src/lib/agent.js`:
+Each step the model may call a tool. The engine lives in `src/engine/`; `src/lib/agent.js`
+is the stable entry point the IDE and the tests import:
 
-1. **Inspect** — `list_files` / `read_file` / `search_code` to understand the code first.
+0. **Checkpoint** — before the first tool call the engine snapshots the workspace. The run
+   result exposes that `baseline` id, so Revert works even when a run fails halfway.
+1. **Inspect** — `list_files` / `read_file` / `search_code` to understand the code first, plus
+   `project_overview` and `find_references` for the indexed architecture, imports and reverse
+   dependencies. The prompt starts with a bounded project map; file contents are only read on demand.
 2. **Plan** — a short natural-language plan, surfaced in the UI.
-3. **Act** — `edit_file` (targeted) or `write_file` (new files). Mutations pause for approval,
-   with a preview diff attached to the request.
-4. **Verify** — `run_command` for tests/build. Output and exit code feed back into the loop.
+3. **Act** — `edit_file` (targeted), `write_file` (new files), or `append_file` (extending a file
+   chunk by chunk). Mutations pause for approval, with a preview diff attached to the request.
+4. **Verify** — `verify_project` runs the project's own test/typecheck/lint/build scripts, and
+   `run_command` covers anything else. Output and exit codes feed back into the loop; in the IDE,
+   a change is checked automatically before `finish` is accepted. A failed check goes back to the
+   model as evidence to fix, not as a success.
 5. **Recover** — a failed call is recorded by signature. If the model tries the *same* call again,
-   the loop refuses and injects a reminder instead of executing it.
-6. **Finish** — `finish` ends the run with an honest summary and a `verified` flag.
+   the loop refuses and injects a reminder instead of executing it; repeated failures require a
+   root-cause hypothesis before the next attempt.
+6. **Finish** — `finish` ends the run with an honest summary. The result is classified by evidence:
+   `verified` (a real check passed after the last change), `likely` (verified writes, no passing
+   check), or `unverified` (failed/stopped/no evidence). A model's `verified: true` claim cannot
+   override that classification.
 
-A hard step cap (`MAX_STEPS`) prevents runaway loops.
+Runaway loops are prevented by several independent bounds, not just one: a step cap
+(`MAX_STEPS`, 40 — enough to scaffold and verify a multi-file project), repeated-action and
+no-action limits, a stalled-step limit, a wall-clock budget, and duplicate-call blocking keyed
+to workspace progress.
+
+Large files are built in chunks: `append_file` extends a file instead of replacing it, so a
+model with a small output limit can still produce a long file over several small, verifiable
+calls. Reads of large files say how many lines the file has and instruct the model to
+`read_file` with `start`/`end` for the rest, so big files stay editable rather than half-seen. A call blocked for lack of
+progress becomes legal again as soon as a different action really changes the workspace, which
+is what makes verify → fix → verify work without allowing infinite retries.
+
+### Engine layout
+
+| Module | Responsibility |
+| --- | --- |
+| `src/engine/providers.js` | Model transport: SSE streaming, tool-call assembly, local/hosted policy, retries, timeouts, usage |
+| `src/engine/memory.js` | Bounded transcript, attempt ledger, per-path read cache, metrics |
+| `src/engine/tools.js` | Tool schema binding, execution, approval keys, post-write verification, project tools |
+| `src/engine/projectIndex.js` | Project index, imports/reverse dependencies, architecture context, export/import checks, verification-command detection |
+| `src/engine/reasoning.js` | System prompt, task framing, plan extraction, completion rules |
+| `src/engine/run.js` | The orchestrator: phase machine, guards, budgets, events |
+| `src/engine/limits.js` | Every numeric bound in one place |
+| `src/engine/index.js` | Public API (`runAgent`, transport, memory helpers) |
+
+### Models: local and hosted
+
+Local models run through Ollama and stay on this machine: the transport refuses any non-loopback
+URL for a local provider and never attaches a credential. Hosted providers (OpenAI, Groq, Together,
+OpenRouter, or any OpenAI-compatible endpoint) must be selected explicitly, use `https`, and carry
+their own API key. Both paths share one streaming transport, so tool calling, verification and
+the loop guards are identical either way.
+
+### Error codes
+
+Every run that fails or stops early reports a stable code next to its summary — `ER.0203` when
+the model repeats itself, `ER.0103` for a timeout, `ER.0102` for a rejected API key, and so on.
+The code appears in the run result panel, the final message, the status line, and on thrown
+provider errors. The full list, with what to check for each, is in
+[docs/ERROR-CODES.md](docs/ERROR-CODES.md).
 
 ## Also Included
 

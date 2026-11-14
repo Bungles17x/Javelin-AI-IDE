@@ -26,11 +26,14 @@ import {
   extractHypothesis,
   summariseRun,
 } from './brain.js'
-import { createStandardToolset, RISK, AUTONOMY } from './tools.js'
+import { sanitizeAssistantOutput } from './assistantOutput.js'
+import { normalizeAssistantText, resolveContinuationTask, taskRequiresWorkspaceChange } from './taskIntent.js'
+import { createStandardToolset, canonicalizeToolCall, RISK, AUTONOMY } from './tools.js'
 import { actionSignature, JavelinMemory } from './memory.js'
 
 export const DEFAULT_MAX_STEPS = 30
 const MAX_CONSECUTIVE_FAILURES = 3
+const MAX_NO_ACTION_TURNS = 3
 
 /**
  * @typedef {object} RunOptions
@@ -74,6 +77,7 @@ export async function runJavelin(opts) {
 async function runLoop(opts) {
   const {
     task,
+    priorMessages = [],
     workspace,
     engines,
     signal,
@@ -87,6 +91,16 @@ async function runLoop(opts) {
     onTrajectory,
     _collectCapture,
   } = opts
+  const effectiveTask = resolveContinuationTask(task, priorMessages)
+  const priorTranscript = priorMessages
+    .filter((message) => ['user', 'assistant'].includes(message?.role))
+    .map((message) => ({
+      role: message.role,
+      content: message.role === 'assistant'
+        ? sanitizeAssistantOutput(message.content)
+        : String(message.content ?? '').trim(),
+    }))
+    .filter((message) => message.content)
   // Kept only when a capture hook is present, so a normal run retains no extra state.
   const capturedEvents = onTrajectory ? [] : null
 
@@ -104,6 +118,9 @@ async function runLoop(opts) {
     verificationReason: null,
     commandCount: 0,
     verified: false,
+    progressVersion: 0,
+    noActionTurns: 0,
+    lastResponseText: '',
   }
 
   const run = {
@@ -117,8 +134,9 @@ async function runLoop(opts) {
     baseline: null,
   }
 
-  const transcript = []
+  const transcript = priorTranscript
   const failures = []
+  const attempts = new Map()
   const hypotheses = []
 
   // Single funnel for every emitted event. When capture is on, the same events that
@@ -135,7 +153,7 @@ async function runLoop(opts) {
 
   // Record the plan text and note progress while streaming.
   emit(onEvent, { type: 'phase', phase: state.phase, label: PHASE_LABEL[state.phase] })
-  emit(onEvent, { type: 'run_started', task })
+  emit(onEvent, { type: 'run_started', task: effectiveTask })
 
   // AUTOMATIC BASELINE.
   //
@@ -146,7 +164,7 @@ async function runLoop(opts) {
   // available, even after a run that went badly wrong.
   try {
     const baseline = workspace.snapshot(
-      `Start of run — ${task.slice(0, 48)}${task.length > 48 ? '…' : ''}`,
+      `Start of run — ${effectiveTask.slice(0, 48)}${effectiveTask.length > 48 ? '…' : ''}`,
     )
     run.checkpoints.push(baseline)
     run.baseline = baseline.id
@@ -181,13 +199,13 @@ async function runLoop(opts) {
 
       // Before each reasoning turn, refresh the memory block so newly learned
       // facts and failures are visible immediately.
-      const memoryBlock = buildMemoryBlock(memory, task, state, failures)
+      const memoryBlock = buildMemoryBlock(memory, effectiveTask, state, failures)
 
       let response
       try {
         response = await engine.generate({
           messages: buildPhaseMessages({
-            task,
+            task: effectiveTask,
             phase: state.phase,
             transcript,
             memoryBlock,
@@ -200,7 +218,6 @@ async function runLoop(opts) {
           }),
           tools: tools.schemas(),
           signal,
-          onToken: (delta) => emit(onEvent, { type: 'thinking_delta', delta }),
         })
       } catch (err) {
         if (err?.name === 'AbortError' || signal?.aborted) {
@@ -212,13 +229,15 @@ async function runLoop(opts) {
         return finalise()
       }
 
-      const text = response.text ?? ''
-      const toolCalls = response.toolCalls ?? []
+      const text = sanitizeAssistantOutput(response.text)
+      const toolCalls = (response.toolCalls ?? []).map(canonicalizeToolCall)
+      const normalizedResponse = normalizeAssistantText(text)
+      const repeatedResponse = Boolean(normalizedResponse && normalizedResponse === state.lastResponseText)
+      state.lastResponseText = normalizedResponse
 
       if (text.trim()) {
-        emit(onEvent, { type: 'thinking', content: text.trim() })
+        emit(onEvent, { type: 'thinking', content: text.trim(), repeated: repeatedResponse })
         transcript.push({ role: 'assistant', content: text.trim() })
-
         // Capture the plan the first time the model states one.
         if (state.phase === PHASE.PLAN && !state.planStated) {
           const plan = extractPlan(text)
@@ -240,11 +259,27 @@ async function runLoop(opts) {
             emit(onEvent, { type: 'hypothesis', hypothesis: h })
           }
         }
+      } else {
+        state.lastResponseText = ''
       }
 
       // No tool calls: the model is reasoning out loud. Advance the phase or
       // nudge it toward action.
       if (!toolCalls.length) {
+        if (!taskRequiresWorkspaceChange(effectiveTask) && text.trim()) {
+          run.status = 'done'
+          run.summary = text.trim()
+          state.phase = PHASE.CONCLUDE
+          return finalise()
+        }
+        state.noActionTurns += 1
+        if (state.noActionTurns >= MAX_NO_ACTION_TURNS) {
+          run.status = 'failed'
+          run.summary = repeatedResponse
+            ? `Stopped after ${MAX_NO_ACTION_TURNS} turns without a tool action; the model kept repeating itself.`
+            : `Stopped after ${MAX_NO_ACTION_TURNS} consecutive turns without a tool action. Clarify the task or check the selected model.`
+          return finalise()
+        }
         if (state.phase === PHASE.UNDERSTAND) {
           state.phase = PHASE.PLAN
           continue
@@ -261,10 +296,9 @@ async function runLoop(opts) {
         if (state.phase === PHASE.ACT || state.phase === PHASE.OBSERVE || state.phase === PHASE.VERIFY) {
           transcript.push({
             role: 'user',
-            content:
-              'You described an action but did not perform it. Do not narrate — call the tool ' +
-              'NOW to actually make the change (write_file with the full contents, edit_file ' +
-              'with the exact old_string/new_string). Then continue.',
+            content: repeatedResponse
+              ? 'Your previous response repeated the same text without taking an action. Do not repeat it again. Call the relevant tool now to make progress.'
+              : 'You described an action but did not perform it. Do not narrate — call the tool NOW to actually make the change (write_file with the full contents, edit_file with the exact old_string/new_string). Then continue.',
           })
           continue
         }
@@ -272,7 +306,10 @@ async function runLoop(opts) {
         // not signalled completion, so accept it only if it actually did the work;
         // otherwise keep nudging toward a tool call or an explicit finish.
         if (state.phase === PHASE.CONCLUDE) {
-          if (state.stepsTaken > 0 || state.hasEdited) {
+          const hasSuccessfulMutation = run.steps.some((record) =>
+            ['write_file', 'create_folder', 'edit_file', 'delete_file', 'rename_file', 'copy_file'].includes(record.name) && record.ok,
+          )
+          if (!taskRequiresWorkspaceChange(effectiveTask) || hasSuccessfulMutation) {
             run.status = 'done'
             run.summary = text.trim() || 'Completed.'
             return finalise()
@@ -292,6 +329,7 @@ async function runLoop(opts) {
         })
         continue
       }
+      state.noActionTurns = 0
 
       // Execute each requested tool call.
       for (const call of toolCalls) {
@@ -301,20 +339,45 @@ async function runLoop(opts) {
 
         const signature = actionSignature(call.name, call.args)
 
-        // --- Block an exact repeat of something that already failed ---------
-        if (failures.includes(signature)) {
+        // A repeated call against the same workspace revision is a loop even if
+        // the first call succeeded (for example repeatedly listing the same tree).
+        const priorAttempt = attempts.get(signature)
+        if (priorAttempt?.progressVersion === state.progressVersion) {
           const note =
-            `BLOCKED: you already tried \`${signature}\` and it failed. ` +
-            `Repeating it will fail identically. Take a different approach — ` +
-            `re-read the file, add more context, or use a different tool.`
+            `BLOCKED: you already tried \`${signature}\` at this unchanged workspace revision. ` +
+            `Use its result from context or choose a materially different action.`
           emit(onEvent, { type: 'repeat_blocked', signature, note })
           transcript.push({ role: 'tool', tool_call_id: call.id, content: note })
           state.consecutiveFailures++
+          if (state.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            run.status = 'failed'
+            run.summary = `Stopped after ${state.consecutiveFailures} repeated actions made no progress.`
+            return finalise()
+          }
           continue
         }
+        attempts.set(signature, { progressVersion: state.progressVersion, failed: false })
 
         // --- finish() -------------------------------------------------------
         if (call.name === 'finish') {
+          const hasSuccessfulMutation = run.steps.some((record) =>
+            ['write_file', 'create_folder', 'edit_file', 'delete_file', 'rename_file', 'copy_file'].includes(record.name) && record.ok,
+          )
+          if (taskRequiresWorkspaceChange(effectiveTask) && !hasSuccessfulMutation) {
+            const refusal =
+              'Finish refused: this task asks for a workspace change, but no file or folder change has succeeded. ' +
+              'A file listing or checkpoint alone is not completion. Inspect the relevant files, make the requested change, and verify it before finishing.'
+            emit(onEvent, { type: 'tool_call', id: call.id, name: call.name, args: call.args })
+            emit(onEvent, { type: 'tool_result', id: call.id, name: call.name, ok: false, output: refusal })
+            emit(onEvent, { type: 'completion_required', note: refusal })
+            transcript.push({ role: 'tool', tool_call_id: call.id, content: refusal })
+            state.phase = PHASE.ACT
+            transcript.push({
+              role: 'user',
+              content: 'Continue the requested implementation. Do not create another checkpoint or call finish until a file or folder change succeeds.',
+            })
+            continue
+          }
           const verdict = verificationPolicy({
             hasEdited: state.hasEdited,
             verificationAvailable: Boolean(runCommand),
@@ -374,8 +437,9 @@ async function runLoop(opts) {
           if (!decision?.approved) {
             const note = `The user DENIED ${call.name}. Do not retry it. Propose an alternative or stop.`
             failures.push(signature)
+            attempts.set(signature, { progressVersion: state.progressVersion, failed: true })
             memory.observe({
-              task,
+              task: effectiveTask,
               signature,
               tool: call.name,
               args: call.args,
@@ -404,13 +468,14 @@ async function runLoop(opts) {
           signal,
           onEvent,
           memory,
-          task,
+          task: effectiveTask,
         })
 
         state.stepsTaken++
 
-        if (RISK.WRITE === tools.get(call.name)?.risk && outcome.ok) {
+        if (RISK.WRITE === tools.get(call.name)?.risk && outcome.ok && outcome.progress !== false) {
           state.hasEdited = true
+          state.progressVersion += 1
           // No safety checkpoint needed here: the runtime already took an automatic
           // baseline before the run started, so "revert everything" is always possible.
         }
@@ -441,8 +506,9 @@ async function runLoop(opts) {
 
         if (outcome.ok) {
           state.consecutiveFailures = 0
+          attempts.set(signature, { progressVersion: state.progressVersion, failed: false })
           memory.observe({
-            task,
+              task: effectiveTask,
             signature,
             tool: call.name,
             args: call.args,
@@ -451,11 +517,12 @@ async function runLoop(opts) {
           })
         } else {
           state.consecutiveFailures++
+          attempts.set(signature, { progressVersion: state.progressVersion, failed: true })
           if (!failures.includes(signature)) {
             failures.push(signature)
           }
           memory.observe({
-            task,
+            task: effectiveTask,
             signature,
             tool: call.name,
             args: call.args,
@@ -464,7 +531,7 @@ async function runLoop(opts) {
           })
         }
 
-        if (outcome.ok && call.args?.path && tools.get(call.name)?.risk === RISK.WRITE) {
+        if (outcome.ok && outcome.progress !== false && call.args?.path && tools.get(call.name)?.risk === RISK.WRITE) {
           run.filesTouched.add(call.args.path)
         }
 
@@ -547,6 +614,9 @@ async function runLoop(opts) {
       summary,
       rawSummary: run.summary,
       verified: state.verified,
+      // Same three-level classification the Agent engine reports, so the UI badge
+      // means one thing everywhere.
+      confidence: state.verified ? 'verified' : run.status === 'done' ? 'likely' : 'unverified',
       steps: run.steps,
       checkpoints: run.checkpoints,
       filesTouched: [...run.filesTouched],
@@ -554,7 +624,7 @@ async function runLoop(opts) {
       baseline: run.baseline,
       memory: memory.snapshot(),
       // Included so an auto-capture hook has the run's own description and plan.
-      task,
+      task: effectiveTask,
       plan: state.plan,
     }
 
@@ -590,9 +660,14 @@ async function runLoop(opts) {
  * ------------------------------------------------------------------ */
 
 async function executeTool(call, ctx) {
+  call = canonicalizeToolCall(call)
   const tool = ctx.tools.get(call.name)
   if (!tool) {
-    return { ok: false, output: `Unknown tool: ${call.name}` }
+    const available = ctx.tools.active().map((entry) => entry.name).join(', ')
+    return {
+      ok: false,
+      output: `Unsupported tool "${call.name}". Available tools: ${available}. Use write_file with path and content to create a file, or create_folder with path to create a directory.`,
+    }
   }
 
   try {
@@ -601,6 +676,7 @@ async function executeTool(call, ctx) {
       runCommand: ctx.runCommand,
       emit: ctx.onEvent,
       signal: ctx.signal,
+      id: call.id,
     })
 
     return result

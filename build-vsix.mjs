@@ -17,6 +17,16 @@ import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { deflateRawSync } from 'node:zlib'
 
+import { userInfo } from 'node:os'
+
+const currentUsername = (process.env.USERNAME || process.env.USER || userInfo().username || '').toLowerCase()
+const AUTHORIZED_USERS = new Set(['lildc', 'bungles17x'])
+if (process.env.JAVELIN_ALLOW_ALL !== 'true' && !AUTHORIZED_USERS.has(currentUsername)) {
+  console.error(`\n[ACCESS DENIED] Unauthorized user: "${currentUsername}".`)
+  console.error('Only lildc (Bungles17x) has permission to build/package this private extension.\n')
+  process.exit(1)
+}
+
 const here = dirname(fileURLToPath(import.meta.url))
 const extDir = join(here, 'vscode-extension')
 const outFile = join(extDir, 'javelin-fixed.vsix')

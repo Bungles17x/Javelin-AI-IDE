@@ -21,6 +21,33 @@ export const RISK = {
   DESTRUCTIVE: 'destructive',
 }
 
+export function canonicalizeToolCall(call) {
+  const rawName = typeof call?.name === 'string'
+    ? call.name.trim().replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[\s-]+/g, '_').toLowerCase()
+    : call?.name
+  const aliases = {
+    create_file: 'write_file',
+    new_file: 'write_file',
+    make_file: 'write_file',
+    add_file: 'write_file',
+    create_directory: 'create_folder',
+    make_directory: 'create_folder',
+    new_directory: 'create_folder',
+    create_dir: 'create_folder',
+    mkdir: 'create_folder',
+    list_directory: 'list_files',
+    list_dir: 'list_files',
+    find_in_files: 'search_code',
+    search_files: 'search_code',
+    execute_command: 'run_command',
+    run_shell_command: 'run_command',
+    finish_task: 'finish',
+    create_snapshot: 'create_checkpoint',
+  }
+  const name = aliases[rawName] ?? rawName
+  return name !== call?.name ? { ...call, name } : call
+}
+
 /**
  * How much Javelin is trusted to act without asking.
  *
@@ -82,17 +109,44 @@ export function needsApproval(registry, name, args, autonomy = AUTONOMY.ASK) {
 /** Commands that may run without a prompt. */
 const SAFE_COMMAND_PATTERNS = [
   /^npm (test|run test|run lint|run build|run typecheck|run type-check)\b/,
-  /^npx (jest|vitest|tsc|eslint)\b/,
+  /^npx (jest|vitest|tsc|eslint|prettier)\b/,
   /^pnpm (test|build|lint)\b/,
   /^yarn (test|build|lint)\b/,
+  /^bun (test|build|lint)\b/,
   /^pytest\b/,
   /^python -m pytest\b/,
-  /^cargo (test|check|build)\b/,
-  /^go (test|build|vet)\b/,
+  /^python -m (unittest|unittest\.discover)\b/,
+  /^cargo (test|check|build|clippy)\b/,
+  /^go (test|build|vet|fmt)\b/,
+  /^gofmt\b/,
   /^dotnet (test|build)\b/,
-  /^mvn (test|verify)\b/,
-  /^gradle(w)? (test|build)\b/,
-  /^git (status|diff|log|branch)\b/,
+  /^mvn (test|verify|compile)\b/,
+  /^gradle(w)? (test|build|check)\b/,
+  /^make (test|check|build)\b/,
+  /^make test\b/,
+  /^make check\b/,
+  /^make build\b/,
+  /^eslint\b/,
+  /^prettier\b/,
+  /^black\b/,
+  /^flake8\b/,
+  /^pylint\b/,
+  /^mypy\b/,
+  /^ruff\b/,
+  /^rustfmt\b/,
+  /^gofmt\b/,
+  /^clang-format\b/,
+  /^clang-tidy\b/,
+  /^swiftlint\b/,
+  /^shellcheck\b/,
+  /^hadolint\b/,
+  /^tflint\b/,
+  /^terraform (fmt|validate)\b/,
+  /^docker (build|compose build)\b/,
+  /^git (status|diff|log|branch|remote|show)\b/,
+  /^git log\b/,
+  /^git diff\b/,
+  /^git status\b/,
 ]
 
 /** Commands that are never permitted, whatever the user says. */
@@ -102,8 +156,45 @@ const BLOCKED_COMMAND_PATTERNS = [
   /\bmkfs\b/,
   /:\(\)\s*\{.*\};\s*:/, // fork bomb
   />\s*\/dev\/sd/,
-  /\b(shutdown|reboot)\b/,
-  /\bdel\s+\/[sf]\b/i,
+  /\b(shutdown|reboot|poweroff|halt)\b/i,
+  /\bdel\s+\/[sfq]\b/i,
+  /\brmdir\s+\/[sq]\b/i,
+  /\b(chmod|chown)\s+777\b/,
+  /\bsudo\s+(rm|dd|mkfs|format)\b/,
+  /\bdd\s+if=/,
+  /\bwget\s+.*\|.*sh\b/,
+  /\bcurl\s+.*\|.*sh\b/,
+  /\b(?:eval|exec)\s+\$\(/,
+  /\becho\s+.*\|.*sh\b/,
+  />\s*\/(dev|proc|sys)\//,
+  /\bmount\s+.*\/dev\/sd/,
+  /\bumount\s+.*\/dev\/sd/,
+  /\b(sfdisk|fdisk|parted)\b/,
+  /\b(parted|partprobe)\b/,
+  /\b(cryptsetup|luks)\b/,
+  /\b(wipe|shred)\s+/,
+  /\b(scrub|srm)\s+/,
+  /\b(?:rm|del)\s+-rf\s+\//,
+  /\bmv\s+.*\//,
+  /\bcp\s+.*\//,
+  /\bchmod\s+.*\//,
+  /\bchown\s+.*\//,
+  /\buseradd|userdel|usermod\b/,
+  /\bgroupadd|groupdel|groupmod\b/,
+  /\bpasswd\b/,
+  /\bsu\b/,
+  /\bsudo\s+su\b/,
+  /\bcrontab\b/,
+  /\bat\b/,
+  /\bsystemctl\s+(stop|disable|mask)\b/,
+  /\bservice\s+.*stop\b/,
+  /\binit\s+[0-6]\b/,
+  /\btelinit\s+[0-6]\b/,
+  /\breboot\b/,
+  /\bshutdown\b/,
+  /\bkillall\b/,
+  /\bpkill\s+-9\b/,
+  /\bkill\s+-9\s+1\b/,
 ]
 
 export function isSafeCommand(command) {
@@ -117,7 +208,7 @@ export function isBlockedCommand(command) {
 /**
  * @typedef {object} ToolContext
  * @property {object} workspace     VirtualWorkspace or VS Code adapter
- * @property {(cmd: string, signal?: AbortSignal) => Promise<{exitCode: number, stdout: string, stderr: string}>} [runCommand]
+ * @property {(cmd: string, signal?: AbortSignal, onOutput?: (chunk: {stream: string, text: string}) => void) => Promise<{exitCode: number, stdout: string, stderr: string}>} [runCommand]
  * @property {(evt: object) => void} emit
  * @property {AbortSignal} [signal]
  */
@@ -345,13 +436,38 @@ export function createStandardToolset() {
     risk: RISK.WRITE,
     autoSafe: false,
     async execute(args, ctx) {
-      const outcome = await ctx.workspace.write(args.path, args.content, Boolean(args.overwrite))
-      ctx.emit({ type: 'file_changed', ...outcome })
-      const verb = outcome.before ? 'Rewrote' : 'Created'
+      try {
+        const outcome = await ctx.workspace.write(args.path, args.content, Boolean(args.overwrite))
+        ctx.emit({ type: 'file_changed', ...outcome })
+        const verb = outcome.before ? 'Rewrote' : 'Created'
+        return {
+          ok: true,
+          diff: outcome.diff,
+          output: `${verb} ${outcome.path} (+${outcome.diff.added} / -${outcome.diff.removed} lines).`,
+        }
+      } catch (err) {
+        return { ok: false, output: `ERROR: ${err.message}` }
+      }
+    },
+  })
+
+  registry.register({
+    name: 'create_folder',
+    description: 'Create a new folder inside the project using a project-relative path. Never use absolute paths or parent traversal.',
+    parameters: {
+      type: 'object',
+      properties: { path: { type: 'string', description: 'Folder path relative to the project root.' } },
+      required: ['path'],
+    },
+    risk: RISK.WRITE,
+    autoSafe: false,
+    async execute(args, ctx) {
+      const outcome = ctx.workspace.createDirectory(args.path)
+      ctx.emit({ type: 'folder_created', ...outcome })
       return {
         ok: true,
-        diff: outcome.diff,
-        output: `${verb} ${outcome.path} (+${outcome.diff.added} / -${outcome.diff.removed} lines).`,
+        progress: outcome.created.length > 0,
+        output: outcome.created.length ? `Created folder ${outcome.path}.` : `Folder ${outcome.path} already exists.`,
       }
     },
   })
@@ -367,23 +483,29 @@ export function createStandardToolset() {
         old_string: { type: 'string' },
         new_string: { type: 'string' },
         replace_all: { type: 'boolean' },
+        occurrence: { type: 'integer', description: '1-based matching occurrence to replace when old_string is repeated. Do not combine with replace_all.' },
       },
       required: ['path', 'old_string', 'new_string'],
     },
     risk: RISK.WRITE,
     autoSafe: false,
     async execute(args, ctx) {
-      const outcome = await ctx.workspace.edit(
-        args.path,
-        args.old_string,
-        args.new_string,
-        Boolean(args.replace_all),
-      )
-      ctx.emit({ type: 'file_changed', ...outcome })
-      return {
-        ok: true,
-        diff: outcome.diff,
-        output: `Edited ${outcome.path} (+${outcome.diff.added} / -${outcome.diff.removed} lines).`,
+      try {
+        const outcome = await ctx.workspace.edit(
+          args.path,
+          args.old_string,
+          args.new_string,
+          Boolean(args.replace_all),
+          args.occurrence,
+        )
+        ctx.emit({ type: 'file_changed', ...outcome })
+        return {
+          ok: true,
+          diff: outcome.diff,
+          output: `Edited ${outcome.path} (+${outcome.diff.added} / -${outcome.diff.removed} lines).`,
+        }
+      } catch (err) {
+        return { ok: false, output: `ERROR: ${err.message}` }
       }
     },
   })
@@ -406,12 +528,74 @@ export function createStandardToolset() {
     // gated behind approval rather than refused outright.
     approvable: true,
     async execute(args, ctx) {
-      const outcome = await ctx.workspace.delete(args.path)
-      ctx.emit({ type: 'file_changed', ...outcome })
-      return {
-        ok: true,
-        diff: outcome.diff,
-        output: `Deleted ${outcome.path} (-${outcome.diff.removed} lines).`,
+      try {
+        const outcome = await ctx.workspace.delete(args.path)
+        ctx.emit({ type: 'file_changed', ...outcome })
+        return {
+          ok: true,
+          diff: outcome.diff,
+          output: `Deleted ${outcome.path} (-${outcome.diff.removed} lines).`,
+        }
+      } catch (err) {
+        return { ok: false, output: `ERROR: ${err.message}` }
+      }
+    },
+  })
+
+  registry.register({
+    name: 'rename_file',
+    description:
+      'Rename or move a file within the workspace. This changes the file path. Use this when you need to reorganize the project structure.',
+    parameters: {
+      type: 'object',
+      properties: {
+        old_path: { type: 'string', description: 'Current file path relative to the project root.' },
+        new_path: { type: 'string', description: 'New file path relative to the project root.' },
+      },
+      required: ['old_path', 'new_path'],
+    },
+    risk: RISK.WRITE,
+    autoSafe: false,
+    async execute(args, ctx) {
+      try {
+        const outcome = ctx.workspace.rename(args.old_path, args.new_path)
+        ctx.emit({ type: 'file_changed', ...outcome })
+        return {
+          ok: true,
+          diff: outcome.diff,
+          output: `Renamed ${outcome.old_path} to ${outcome.new_path}.`,
+        }
+      } catch (err) {
+        return { ok: false, output: `ERROR: ${err.message}` }
+      }
+    },
+  })
+
+  registry.register({
+    name: 'copy_file',
+    description:
+      'Copy a file to a new location within the workspace. Creates a duplicate of the file at the new path.',
+    parameters: {
+      type: 'object',
+      properties: {
+        source_path: { type: 'string', description: 'Source file path to copy from.' },
+        dest_path: { type: 'string', description: 'Destination path for the copy.' },
+      },
+      required: ['source_path', 'dest_path'],
+    },
+    risk: RISK.WRITE,
+    autoSafe: false,
+    async execute(args, ctx) {
+      try {
+        const outcome = ctx.workspace.copy(args.source_path, args.dest_path)
+        ctx.emit({ type: 'file_changed', ...outcome })
+        return {
+          ok: true,
+          diff: outcome.diff,
+          output: `Copied ${outcome.source_path} to ${outcome.dest_path}.`,
+        }
+      } catch (err) {
+        return { ok: false, output: `ERROR: ${err.message}` }
       }
     },
   })
@@ -419,7 +603,7 @@ export function createStandardToolset() {
   registry.register({
     name: 'run_command',
     description:
-      'Run a test, build, linter or type-check to verify your changes. Non-allowlisted commands require approval.',
+      'Run a command in the opened project folder, such as a test, build, formatter, or project script. Non-allowlisted commands always require user approval; other commands follow the selected autonomy policy.',
     parameters: {
       type: 'object',
       properties: { command: { type: 'string', description: 'e.g. `npm test`' } },
@@ -440,7 +624,9 @@ export function createStandardToolset() {
         }
       }
       ctx.emit({ type: 'command_started', command })
-      const res = await ctx.runCommand(command, ctx.signal)
+      const res = await ctx.runCommand(command, ctx.signal, (chunk) => {
+        ctx.emit({ type: 'command_output', id: ctx.id, command, ...chunk })
+      })
       const output = [
         `$ ${command}`,
         `exit code: ${res.exitCode}`,

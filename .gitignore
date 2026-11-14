@@ -1,9 +1,14 @@
 node_modules/
 dist/
+installer-output/
+release/
+public/monaco/
 *.local
 .env
 .env.*
 !.env.example
+.javelin-owner-code
+secrets/
 
 # Editor / OS
 .DS_Store
@@ -16,6 +21,15 @@ Thumbs.db
 # Test output
 tests/*.bundle.mjs
 # Training artifacts
+# Local inference runtime and quantised weights are large and rebuildable
+# (see training/knowledge/README.md); keep them out of the repository.
+tools/llama/
+tools/llama-src/
+tools/llama-vulkan/
+training/knowledge/gguf/
+training/knowledge/*.gguf
+training/knowledge/merged-*/
+training/knowledge/out*/
 datasets/
 traces/
 training/runs/

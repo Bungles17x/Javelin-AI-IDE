@@ -29,32 +29,42 @@ if (!tests.length) {
 }
 
 let failed = 0
+const failedTests = []
 
 for (const test of tests) {
   const entry = path.join(here, test)
-  const outfile = path.join(outDir, test.replace(/\.mjs$/, '.bundle.mjs'))
-
-  await build({
-    entryPoints: [entry],
-    bundle: true,
-    platform: 'node',
-    format: 'esm',
-    outfile,
-    logLevel: 'silent',
-    absWorkingDir: root,
-  })
-
   console.log(`\n=== ${test} ===`)
-  const result = spawnSync(process.execPath, [outfile], { stdio: 'inherit' })
+  let testFile = entry
+
+  // Keep the CommonJS Electron helper native; bundling it into ESM breaks Node built-in requires.
+  if (test !== 'desktop-text-files.test.mjs') {
+    testFile = path.join(outDir, test.replace(/\.mjs$/, '.bundle.mjs'))
+    await build({
+      entryPoints: [entry],
+      bundle: true,
+      platform: 'node',
+      format: 'esm',
+      outfile: testFile,
+      logLevel: 'silent',
+      absWorkingDir: root,
+      // Workerd provides this built-in module; the Node test bundle only needs
+      // to leave the import intact (the SMTP test injects its own transport).
+      external: ['cloudflare:sockets'],
+    })
+  }
+
+  const result = spawnSync(process.execPath, [testFile], { stdio: 'inherit' })
   if (result.status !== 0) {
     failed++
+    failedTests.push(test)
+    console.error(`\n>>> FAILED TEST: ${test} <<<\n`)
   }
 }
 
 rmSync(outDir, { recursive: true, force: true })
 
 if (failed) {
-  console.error(`\n${failed} test file(s) failed.\n`)
+  console.error(`\n${failed} test file(s) failed: ${failedTests.join(', ')}\n`)
   process.exit(1)
 }
 console.log('\nAll test files passed.\n')

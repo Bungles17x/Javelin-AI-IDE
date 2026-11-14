@@ -1,14 +1,15 @@
-import { streamCompletion, PROVIDERS, DEFAULT_PROVIDER } from './providers'
+import { streamCompletion, PROVIDERS, DEFAULT_PROVIDER, DEFAULT_CLOUD_PROVIDER } from './providers.js'
 
-// Legacy exports kept so existing imports (SettingsDialog, App) keep working.
-// Models/provider now come from the provider layer.
-export const MODELS = PROVIDERS.groq.models
+// Legacy exports remain available to older imports, backed by the local model.
+export const MODELS = PROVIDERS.javelin.models
 
-export const DEFAULT_MODEL = PROVIDERS.groq.defaultModel
+export const DEFAULT_MODEL = PROVIDERS.javelin.defaultModel
 
-export { PROVIDERS, DEFAULT_PROVIDER }
+export { PROVIDERS, DEFAULT_PROVIDER, DEFAULT_CLOUD_PROVIDER }
 
 import { renderModelIdentity } from '../core/identity.js'
+import { CONVERSATION_STYLE, withConversationContext } from '../core/conversation.js'
+import { estimateMessageTokens, estimateTokens } from './usage.js'
 
 /**
  * Chat mode uses the same identity as agent mode, plus chat-specific output
@@ -18,6 +19,8 @@ import { renderModelIdentity } from '../core/identity.js'
  */
 export const SYSTEM_PROMPT = [
   renderModelIdentity(),
+  '',
+  CONVERSATION_STYLE,
   '',
   'RESPONSE FORMAT',
   '- Answer in GitHub-flavored Markdown, fenced with a language tag.',
@@ -39,19 +42,36 @@ export async function streamChat({
   model,
   messages,
   onToken,
+  onUsage,
   signal,
   providerId = DEFAULT_PROVIDER,
   baseUrl,
 }) {
+  const history = messages.slice(-MAX_HISTORY_MESSAGES)
+  const lastUserIndex = history.map((m) => m?.role).lastIndexOf('user')
+
+  // Resolve "why?", "you?", "same" against the thread instead of answering the
+  // literal characters. Only the final user message is rewritten, and only when
+  // there is a real previous exchange to point at.
+  const prepared = history.map((message, index) => {
+    if (index !== lastUserIndex) return message
+    const prior = history.slice(0, index)
+    return { ...message, content: withConversationContext(message.content, prior) }
+  })
+
   const result = await streamCompletion({
     providerId,
     baseUrl,
     apiKey,
     model,
-    messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...messages.slice(-MAX_HISTORY_MESSAGES)],
+    messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...prepared],
     onToken,
     signal,
   })
+  onUsage?.({
+    usage: result.usage ?? null,
+    inputTokens: estimateMessageTokens([{ role: 'system', content: SYSTEM_PROMPT }, ...prepared]),
+    outputTokens: estimateTokens(result.content),
+  })
   return result.content
 }
-

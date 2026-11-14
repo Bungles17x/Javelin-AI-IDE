@@ -13,11 +13,13 @@
 
 import { EngineRegistry, EngineDescriptor } from './engines';
 import { JavelinMemory, MemorySnapshot, actionSignature } from './memory';
-import { createStandardToolset, RISK, AUTONOMY, Autonomy, ToolRegistry } from './tools';
+import { createStandardToolset, canonicalizeToolCall, RISK, AUTONOMY, Autonomy, ToolRegistry } from './tools';
 import {
     PHASE, PHASE_LABEL, buildPhaseMessages, nextPhase, verificationPolicy,
     classifyCommandResult, extractPlan, extractPlanSteps, extractHypothesis, summariseRun,
 } from './brain';
+import { sanitizeAssistantOutput } from './assistantOutput';
+import { resolveContinuationTask, taskRequiresWorkspaceChange } from './taskIntent';
 import { VsCodeWorkspace } from '../workspace';
 
 export const DEFAULT_MAX_STEPS = 30;
@@ -28,7 +30,7 @@ export interface JavelinEvents {
     onPlan?: (plan: string, steps?: string[]) => void;
     onHypothesis?: (hypothesis: string) => void;
     onThinkingDelta?: (delta: string) => void;
-    onThinking?: (text: string) => void;
+    onThinking?: (text: string, repeated?: boolean) => void;
     onToolCall?: (call: { id: string; name: string; args: any }) => void;
     onToolResult?: (result: { id: string; name: string; ok: boolean; output: string; diff?: any }) => void;
     onCheckpoint?: (cp: any) => void;
@@ -52,6 +54,7 @@ export interface JavelinRunResult {
 
 export async function runJavelin(opts: {
     task: string;
+    priorMessages?: Array<{ role?: string; content?: string }>;
     workspace: VsCodeWorkspace;
     engines: EngineRegistry;
     signal: AbortSignal;
@@ -65,10 +68,21 @@ export async function runJavelin(opts: {
 }): Promise<JavelinRunResult> {
     const {
         task, workspace, engines, signal, memory,
+        priorMessages = [],
         events = {}, runCommand, tools = createStandardToolset(),
         maxSteps = DEFAULT_MAX_STEPS,
         autonomy = AUTONOMY.ASK,
     } = opts;
+    const effectiveTask = resolveContinuationTask(task, priorMessages);
+    const transcript: any[] = priorMessages
+        .filter((message) => ['user', 'assistant'].includes(message?.role ?? ''))
+        .map((message) => ({
+            role: message.role,
+            content: message.role === 'assistant'
+                ? sanitizeAssistantOutput(message.content ?? '')
+                : String(message.content ?? '').trim(),
+        }))
+        .filter((message) => message.content);
 
     const state = {
         phase: PHASE.UNDERSTAND as string,
@@ -81,6 +95,7 @@ export async function runJavelin(opts: {
         verificationReason: null as string | null,
         commandCount: 0,
         verified: false,
+        lastResponseText: '',
     };
 
     const run = {
@@ -93,7 +108,6 @@ export async function runJavelin(opts: {
         baseline: null as string | null,
     };
 
-    const transcript: any[] = [];
     const failures: string[] = [];
     const hypotheses: string[] = [];
     const alwaysAllow = new Set<string>();
@@ -115,7 +129,7 @@ export async function runJavelin(opts: {
     // "revert everything" always available, even after a bad run.
     try {
         const baseline = await workspace.snapshot(
-            `Start of run — ${task.slice(0, 48)}${task.length > 48 ? '…' : ''}`,
+            `Start of run — ${effectiveTask.slice(0, 48)}${effectiveTask.length > 48 ? '…' : ''}`,
         );
         run.checkpoints.push(baseline);
         run.baseline = baseline.id;
@@ -148,17 +162,16 @@ export async function runJavelin(opts: {
             );
             emitPhase();
 
-            const memoryBlock = buildMemoryBlock(memory, task, state, failures);
+            const memoryBlock = buildMemoryBlock(memory, effectiveTask, state, failures);
 
             let response;
             try {
                 response = await engine.generate({
                     messages: buildPhaseMessages({
-                        task, phase: state.phase, transcript, memoryBlock, failures, plan: state.plan,
+                        task: effectiveTask, phase: state.phase, transcript, memoryBlock, failures, plan: state.plan,
                     }),
                     tools: tools.schemas(),
                     signal,
-                    onToken: (delta) => events.onThinkingDelta?.(delta),
                 });
             } catch (error: any) {
                 if (error?.name === 'AbortError' || signal.aborted) {
@@ -169,11 +182,14 @@ export async function runJavelin(opts: {
                 return finalise();
             }
 
-            const text = response.text ?? '';
-            const toolCalls = response.toolCalls ?? [];
+            const text = sanitizeAssistantOutput(response.text);
+            const toolCalls = (response.toolCalls ?? []).map(canonicalizeToolCall);
+            const normalizedText = normalizeResponseText(text);
+            const repeatedText = Boolean(normalizedText && normalizedText === state.lastResponseText);
+            state.lastResponseText = normalizedText;
 
             if (text.trim()) {
-                events.onThinking?.(text.trim());
+                events.onThinking?.(text.trim(), repeatedText);
                 transcript.push({ role: 'assistant', content: text.trim() });
 
                 if (state.phase === PHASE.PLAN && !state.planStated) {
@@ -194,6 +210,8 @@ export async function runJavelin(opts: {
                         events.onHypothesis?.(h);
                     }
                 }
+            } else {
+                state.lastResponseText = '';
             }
 
             if (!toolCalls.length) {
@@ -211,6 +229,15 @@ export async function runJavelin(opts: {
                     continue;
                 }
                 if (state.phase === PHASE.CONCLUDE) {
+                    if (taskRequiresWorkspaceChange(effectiveTask) && !state.hasEdited) {
+                        const note =
+                            'Finish refused: this task asks for a workspace change, but no file or folder change has succeeded. ' +
+                            'A file listing or checkpoint alone is not completion. Make the requested change before finishing.';
+                        events.onReminder?.(note);
+                        transcript.push({ role: 'user', content: note });
+                        state.phase = PHASE.ACT;
+                        continue;
+                    }
                     run.status = 'done';
                     run.summary = text.trim() || 'Completed.';
                     return finalise();
@@ -241,6 +268,15 @@ export async function runJavelin(opts: {
                 }
 
                 if (call.name === 'finish') {
+                    if (taskRequiresWorkspaceChange(effectiveTask) && !state.hasEdited) {
+                        const note =
+                            'Finish refused: this task asks for a workspace change, but no file or folder change has succeeded. ' +
+                            'A file listing or checkpoint alone is not completion. Make the requested change before finishing.';
+                        events.onReminder?.(note);
+                        transcript.push({ role: 'tool', tool_call_id: call.id, content: note });
+                        state.phase = PHASE.ACT;
+                        continue;
+                    }
                     const verdict = verificationPolicy({
                         hasEdited: state.hasEdited,
                         verificationAvailable: Boolean(runCommand),
@@ -290,7 +326,7 @@ export async function runJavelin(opts: {
                         const note = `The user DENIED ${call.name}. Do not retry it. Propose an alternative or stop.`;
                         failures.push(signature);
                         memory.observe({
-                            task, signature, tool: call.name, args: call.args,
+                            task: effectiveTask, signature, tool: call.name, args: call.args,
                             outcome: 'failure', detail: 'denied by user',
                         });
                         events.onToolResult?.({ id: call.id, name: call.name, ok: false, output: note });
@@ -334,7 +370,7 @@ export async function runJavelin(opts: {
                 if (outcome.ok) {
                     state.consecutiveFailures = 0;
                     memory.observe({
-                        task, signature, tool: call.name, args: call.args,
+                        task: effectiveTask, signature, tool: call.name, args: call.args,
                         outcome: 'success', detail: outcome.output?.slice(0, 200),
                     });
                     if (call.args?.path && tools.get(call.name)?.risk === RISK.WRITE) {
@@ -346,7 +382,7 @@ export async function runJavelin(opts: {
                         failures.push(signature);
                     }
                     memory.observe({
-                        task, signature, tool: call.name, args: call.args,
+                        task: effectiveTask, signature, tool: call.name, args: call.args,
                         outcome: 'failure', detail: outcome.output,
                     });
                 }
@@ -454,9 +490,14 @@ async function executeTool(
         memory: JavelinMemory;
     },
 ): Promise<{ ok: boolean; output: string; diff?: any; exitCode?: number }> {
+    call = canonicalizeToolCall(call);
     const tool = ctx.tools.get(call.name);
     if (!tool) {
-        return { ok: false, output: `Unknown tool: ${call.name}` };
+        const available = ctx.tools.active().map((entry) => entry.name).join(', ');
+        return {
+            ok: false,
+            output: `Unsupported tool "${call.name}". Available tools: ${available}. Use write_file with path and content to create a file, or create_folder with path to create a directory.`,
+        };
     }
     try {
         return await tool.execute(call.args ?? {}, {
@@ -488,6 +529,10 @@ function buildMemoryBlock(memory: JavelinMemory, task: string, state: any, failu
 function truncate(text: string, max: number): string {
     const s = String(text ?? '');
     return s.length <= max ? s : `${s.slice(0, max)}\n… [truncated ${s.length - max} chars]`;
+}
+
+function normalizeResponseText(text: string): string {
+    return String(text ?? '').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 }
 
 /** Build a memory snapshot reader/writer bound to VS Code globalState. */

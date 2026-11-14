@@ -23,6 +23,18 @@ export function ApprovalDialog({ request, onDecide }) {
     setRemember(false)
   }, [request?.id])
 
+  // Escape always dismisses the dialog, so a modal can never trap the app.
+  useEffect(() => {
+    if (!request) return undefined
+    const onKeyDown = (event) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      onDecide({ approved: false, remember: false })
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [request, onDecide])
+
   if (!request) return null
 
   const Icon = ICONS[request.name] ?? ShieldAlert
@@ -30,14 +42,14 @@ export function ApprovalDialog({ request, onDecide }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      className="glass-overlay fixed inset-0 z-50 flex items-center justify-center p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="approval-title"
     >
-      <div className="w-full max-w-2xl rounded-lg border bg-card p-5 text-card-foreground shadow-xl">
+      <div className="glass-dialog w-full max-w-2xl rounded-3xl border p-5 text-card-foreground">
         <div className="mb-3 flex items-start gap-3">
-          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+          <div className="glass-chip mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-amber-700 dark:text-amber-300">
             <ShieldAlert className="h-4.5 w-4.5" />
           </div>
           <div className="min-w-0 flex-1">
@@ -95,6 +107,8 @@ function describe(request) {
       return 'The agent wants to execute a shell command.'
     case 'write_file':
       return `Write ${request.args?.path ?? 'file'}`
+    case 'create_project':
+      return `Create a ${request.args?.template ?? 'starter'} project${request.args?.path ? ` in ${request.args.path}` : ''}`
     case 'edit_file':
       return `Edit ${request.args?.path ?? 'file'}`
     default:

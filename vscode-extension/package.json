@@ -1,10 +1,11 @@
 {
   "name": "javelin-ai-assistant",
   "displayName": "Javelin AI Assistant",
-  "description": "An AI-powered coding assistant - concise, direct, and technically accurate",
-  "publisher": "javelin",
-  "version": "1.1.0",
+  "description": "A fully self-hosted, local-first AI coding assistant for VS Code. Uses your Javelin model through Ollama; no cloud AI API is required.",
+  "publisher": "javelin-ai-private",
+  "version": "1.2.1",
   "license": "MIT",
+  "private": true,
   "repository": {
     "type": "git",
     "url": "https://github.com/javelin-ai/javelin-ai-assistant.git"
@@ -18,6 +19,11 @@
     "Other"
   ],
   "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:javelin.assistant",
+    "onCommand:javelin.openAssistant"
+  ],
   "contributes": {
     "commands": [
       {
@@ -26,8 +32,53 @@
         "category": "Javelin AI"
       },
       {
-        "command": "javelin.setApiKey",
-        "title": "Set API Key",
+        "command": "javelin.openIdeDashboard",
+        "title": "Open Javelin IDE",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.openAiWorkspace",
+        "title": "Open AI Workspace",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.projectSummary",
+        "title": "Project Summary",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.openExplorer",
+        "title": "Open Explorer",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.openTerminal",
+        "title": "Open Terminal",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.openProblems",
+        "title": "Open Problems",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.openExtensions",
+        "title": "Open Extensions",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.runProjectChecks",
+        "title": "Run Project Checks",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.checkForUpdates",
+        "title": "Check for Updates",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.setUpdateToken",
+        "title": "Configure Private Update Access",
         "category": "Javelin AI"
       },
       {
@@ -79,6 +130,86 @@
         "command": "javelin.selectProvider",
         "title": "Select Model Provider",
         "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.explainCode",
+        "title": "Explain Selected Code",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.refactorCode",
+        "title": "Refactor Selected Code",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.findBugs",
+        "title": "Find Bugs in Selected Code",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.generateTests",
+        "title": "Generate Tests for Selected Code",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.generateDocs",
+        "title": "Generate Documentation for Selected Code",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.codeReview",
+        "title": "Code Review Selected Code",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.optimizeCode",
+        "title": "Optimize Selected Code",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.securityScan",
+        "title": "Security Scan Selected Code",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.addComments",
+        "title": "Add Comments to Selected Code",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.quickAction",
+        "title": "Quick Action…",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.saveSnippet",
+        "title": "Save Code Snippet",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.loadSnippet",
+        "title": "Load Code Snippet",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.exportConversation",
+        "title": "Export Conversation",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.findTODOs",
+        "title": "Find TODOs in Project",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.checkDependencies",
+        "title": "Check for Outdated Dependencies",
+        "category": "Javelin AI"
+      },
+      {
+        "command": "javelin.workspaceStats",
+        "title": "Show Workspace Statistics",
+        "category": "Javelin AI"
       }
     ],
     "menus": {
@@ -87,11 +218,69 @@
           "command": "javelin.askAboutSelection",
           "when": "editorHasSelection",
           "group": "javelin@1"
+        },
+        {
+          "command": "javelin.explainCode",
+          "when": "editorHasSelection",
+          "group": "javelin@2"
+        },
+        {
+          "command": "javelin.refactorCode",
+          "when": "editorHasSelection",
+          "group": "javelin@3"
+        },
+        {
+          "command": "javelin.findBugs",
+          "when": "editorHasSelection",
+          "group": "javelin@4"
+        },
+        {
+          "command": "javelin.generateTests",
+          "when": "editorHasSelection",
+          "group": "javelin@5"
+        },
+        {
+          "command": "javelin.quickAction",
+          "when": "editorHasSelection",
+          "group": "javelin@6"
         }
       ],
       "commandPalette": [
         {
           "command": "javelin.openAssistant"
+        },
+        {
+          "command": "javelin.openIdeDashboard"
+        },
+        {
+          "command": "javelin.openAiWorkspace"
+        },
+        {
+          "command": "javelin.projectSummary"
+        },
+        {
+          "command": "javelin.openExplorer"
+        },
+        {
+          "command": "javelin.openTerminal"
+        },
+        {
+          "command": "javelin.openProblems"
+        },
+        {
+          "command": "javelin.openExtensions"
+        },
+        {
+          "command": "javelin.runProjectChecks"
+        },
+        {
+          "command": "javelin.checkForUpdates"
+        },
+        {
+          "command": "javelin.setUpdateToken"
+        },
+        {
+          "command": "javelin.quickAction"
         }
       ]
     },
@@ -112,6 +301,20 @@
           "name": "AI Assistant",
           "contextualTitle": "Javelin AI Assistant",
           "icon": "$(robot)"
+        },
+        {
+          "type": "tree",
+          "id": "javelin.workspaceOverview",
+          "name": "Workspace",
+          "contextualTitle": "Javelin Workspace",
+          "icon": "$(folder-library)"
+        },
+        {
+          "type": "tree",
+          "id": "javelin.memoryOverview",
+          "name": "Memory",
+          "contextualTitle": "Javelin Memory",
+          "icon": "$(history)"
         }
       ]
     },
@@ -120,67 +323,29 @@
       "properties": {
         "javelin.provider": {
           "type": "string",
-          "default": "local",
+          "default": "javelin",
           "enum": [
             "javelin",
-            "local",
-            "groq",
-            "custom"
+            "local"
           ],
           "enumDescriptions": [
-            "Your own fine-tuned Javelin model, served locally (no API key)",
-            "Keyless local model via Ollama — code never leaves your machine",
-            "Groq cloud inference (needs an API key)",
-            "Any other OpenAI-compatible endpoint"
+            "Your Javelin model served locally through Ollama (no cloud API or key)",
+            "Keyless local model via Ollama — code never leaves your machine"
           ],
-          "markdownDescription": "Where the model runs. **Javelin (fine-tuned)** serves your own trained weights and needs no API key. See [docs/TRAINING.md](docs/TRAINING.md).",
+          "markdownDescription": "Where the model runs. The default **Javelin** provider uses your local Javelin model through Ollama. Inference stays on this machine; no cloud AI API or key is used.",
           "order": 0
         },
         "javelin.baseUrl": {
           "type": "string",
           "default": "",
-          "description": "Override the provider endpoint base URL (e.g. http://localhost:11434/v1). Leave blank for the provider default.",
+          "description": "Optional local Ollama endpoint override. Javelin only accepts localhost on port 11434.",
           "order": 1
         },
         "javelin.model": {
           "type": "string",
-          "default": "javelin-coder",
-          "enum": [
-            "javelin-coder",
-            "javelin-coder-80b",
-            "javelin",
-            "qwen2.5-coder:7b",
-            "qwen2.5-coder:14b",
-            "deepseek-coder-v2:16b",
-            "llama3.1:8b",
-            "codellama:13b",
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "openai/gpt-oss-120b",
-            "qwen/qwen3-32b"
-          ],
-          "enumDescriptions": [
-            "Javelin Coder — your own Javelin model running locally. Build it once with `npm run model:local`. Keyless, offline, on your machine.",
-            "Javelin Coder 80B — the flagship Javelin model. Requires the 'Javelin (fine-tuned)' provider, and must be trained + merged first (run `npm run models` to check).",
-            "Javelin (latest) — your trained Javelin weights, served locally.",
-            "Qwen2.5 Coder 7B — keyless local model via Ollama (default).",
-            "Qwen2.5 Coder 14B — larger local coder model.",
-            "DeepSeek Coder V2 16B — local coder model.",
-            "Llama 3.1 8B — general local model.",
-            "Code Llama 13B — local coder model.",
-            "Llama 3.3 70B — Groq cloud (fast, needs an API key).",
-            "Llama 3.1 8B Instant — Groq cloud, fastest.",
-            "GPT-OSS 120B — Groq cloud.",
-            "Qwen3 32B — Groq cloud."
-          ],
-          "markdownDescription": "Model id to use. **Javelin Coder 80B** is Javelin's own flagship model — select the **Javelin (fine-tuned)** provider for it, and run `npm run models` to confirm it has actually been trained and merged. Local models are Ollama tags (e.g. `qwen2.5-coder:7b`).",
+          "default": "javelin-coder:latest",
+          "markdownDescription": "Model tag served by your local Ollama installation.",
           "order": 2
-        },
-        "javelin.groqApiKey": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "API key for cloud providers (free at https://console.groq.com/keys). Prefer the **Javelin AI: Set API Key** command — it stores the key encrypted instead of in plain text here. Not needed for the local provider.",
-          "order": 3
         },
         "javelin.autonomy": {
           "type": "string",

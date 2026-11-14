@@ -186,16 +186,16 @@ def load_config():
 
 
 def detect_device(torch):
-    ""
+    """
     Report which accelerator is actually usable, without assuming CUDA.
 
     AMD users are the case this exists for: an RX 6000-series card on Windows has
     no working ROCm path, so PyTorch reports CPU. Rather than crashing, say so and
     continue on CPU where that is viable.
-    ""
+    """
     if torch.cuda.is_available():
         total = torch.cuda.get_device_properties(0).total_memory / 1e9
-        return "cuda", f"{torch.cuda.get_device_name(0)} ({total:.1f GB)"
+        return "cuda", f"{torch.cuda.get_device_name(0)} ({total:.1f} GB)"
 
     # ROCm builds of PyTorch report through torch.cuda but set torch.version.hip.
     hip_version = getattr(torch.version, "hip", None)
@@ -369,6 +369,8 @@ def main():
 
     # bf16 needs a GPU that supports it; CPU and older cards fall back to fp32.
     use_bf16 = bool(train_cfg["bf16"]) and device != "cpu"
+    train_steps = len(dataset["train"]) * train_cfg["epochs"]
+    warmup_steps = max(1, int(train_steps * train_cfg["warmupRatio"]))
 
     args = TrainingArguments(
         output_dir=cfg["output"]["dir"],
@@ -377,7 +379,7 @@ def main():
         gradient_accumulation_steps=train_cfg["gradientAccumulationSteps"],
         learning_rate=train_cfg["learningRate"],
         lr_scheduler_type=train_cfg["lrScheduler"],
-        warmup_ratio=train_cfg["warmupRatio"],
+        warmup_steps=warmup_steps,
         bf16=use_bf16,
         fp16=False,
         use_cpu=(device == "cpu"),
@@ -397,7 +399,6 @@ def main():
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
         processing_class=tokenizer,
-        peft_config=peft_config,
     )
 
     trainer.train()

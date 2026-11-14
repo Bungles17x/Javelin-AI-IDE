@@ -87,39 +87,45 @@ export function createJavelin(opts = {}) {
       autoCapture = false,
       captureDir = 'traces',
       onCaptured,
+      priorMessages = [],
     }) {
-      // Index the project once per run so the reasoner is grounded in reality.
-      // snapshotFiles may be async (the VS Code adapter reads from disk), so the
-      // result is awaited — passing a Promise here would index nothing and leave
-      // the agent planning against an empty project.
-      if (workspace && typeof workspace.toJSON === 'function') {
-        memory.indexProject(workspace.toJSON())
-      } else if (workspace && typeof workspace.snapshotFiles === 'function') {
-        memory.indexProject(await workspace.snapshotFiles())
+      if (activeRun) {
+        throw new Error('Javelin is already running a task.')
       }
 
       const controller = new AbortController()
       const combined = combineSignals(signal, controller.signal)
       activeRun = controller
-      // Build the capture hook for this run. It writes the finished trajectory and
-      // reports the outcome; a failure to write never fails the run.
-      const captureHook = autoCapture
-        ? makeTrajectoryHook({
-          enabled: true,
-          dir: captureDir,
-          meta: {
-            // `opts` here is createJavelin's options (the instance config).
-            model: opts.model ?? null,
-            provider: opts.provider?.id ?? null,
-            identityFingerprint: identityFingerprint(),
-          },
-          onCaptured,
-        })
-        : null
+      const restoreCommandTool = !runCommand && tools.has('run_command')
+      if (restoreCommandTool) tools.disable('run_command')
 
       try {
+        // Reserve the instance before awaiting a disk-backed workspace snapshot.
+        // Otherwise two callers can start overlapping runs during indexing.
+        if (workspace && typeof workspace.toJSON === 'function') {
+          memory.indexProject(workspace.toJSON())
+        } else if (workspace && typeof workspace.snapshotFiles === 'function') {
+          memory.indexProject(await workspace.snapshotFiles())
+        }
+
+        // Build the capture hook for this run. It writes the finished trajectory and
+        // reports the outcome; a failure to write never fails the run.
+        const captureHook = autoCapture
+          ? makeTrajectoryHook({
+            enabled: true,
+            dir: captureDir,
+            meta: {
+              model: opts.model ?? null,
+              provider: opts.provider?.id ?? null,
+              identityFingerprint: identityFingerprint(),
+            },
+            onCaptured,
+          })
+          : null
+
         const result = await runJavelin({
           task,
+          priorMessages,
           workspace,
           engines,
           signal: combined,
@@ -135,6 +141,7 @@ export function createJavelin(opts = {}) {
         })
         return result
       } finally {
+        if (restoreCommandTool) tools.enable('run_command')
         activeRun = null
       }
     },

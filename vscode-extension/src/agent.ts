@@ -14,21 +14,42 @@
 import * as vscode from 'vscode';
 import { streamCompletion, ToolCall } from './providers';
 import { VsCodeWorkspace, DiffResult } from './workspace';
-import { AUTONOMY, Autonomy } from './core/tools';
+import { AUTONOMY, Autonomy, canonicalizeToolCall } from './core/tools';
+import { sanitizeAssistantOutput } from './core/assistantOutput';
+import { resolveContinuationTask, taskRequiresWorkspaceChange } from './core/taskIntent';
+import { ERROR_CODES, classifyModelError } from './core/errorCodes';
 
-export const MAX_STEPS = 24;
+export const MAX_STEPS = 40;
+const MAX_NO_ACTION_TURNS = 3;
+/** Two normalised-identical responses in a row is a loop, not progress. */
+const MAX_IDENTICAL_RESPONSES = 3;
+/** Bounded retries for a transient model/transport failure. */
+const MAX_MODEL_RETRIES = 2;
+const FAILURE_REMINDER_PREFIX = 'Actions you have ALREADY TRIED AND FAILED';
+/** Tools whose success must be proven on disk, not just reported. */
+const MUTATING_TOOLS = ['write_file', 'append_file', 'edit_file', 'delete_file', 'create_folder', 'rename_file', 'copy_file'];
+/** Steps allowed without a successful workspace change before the run is stopped. */
+const MAX_STALLED_STEPS = 8;
+/** Wall-clock budget for one run; the step cap still applies. */
+const RUN_BUDGET_MS = 15 * 60_000;
+
+function normalizeAssistantText(text: string): string {
+    return String(text ?? '').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
 
 export const AGENT_SYSTEM_PROMPT = `You are Javelin AI, an autonomous coding agent working inside a real VS Code workspace. You do not just answer questions — you inspect the codebase, plan, make edits, run tests, and fix your own mistakes.
 
 Operating rules:
 1. INVESTIGATE BEFORE EDITING. Call list_files / read_file / search_code to understand the relevant code first. Never invent file paths — verify they exist.
-2. READ BEFORE YOU WRITE. Always read a file before editing it. Use edit_file with an exact snippet for changes; only use write_file for genuinely new files or a deliberate full replacement.
-3. NEVER OVERWRITE BLINDLY. Do not replace a whole file to change a few lines. Match the existing style, imports and conventions of the project.
+2. READ BEFORE YOU WRITE. Always read a file before editing it. Use edit_file with an exact snippet for changes; if that snippet repeats, use the 1-based occurrence number and context provided by the error. Only use write_file for genuinely new files or a deliberate full replacement.
+3. NEVER OVERWRITE BLINDLY. Do not replace a whole file to change a few lines. Match the existing style, imports and conventions of the project. For a file too large to write in one call, write the first chunk with write_file and extend it with append_file — chunked appends are expected for long files, and are safer than truncating one.
+3b. LARGE FILES ARE NORMAL. A file may be thousands of lines. Build it in sections: write_file for the top of the file, then one append_file per following section (150-250 lines, under 24,000 characters per call). Never shrink the requested file to fit one call, never re-emit text you already wrote, and never call a file complete while your last section stopped mid-line — read the tail with read_file to confirm it ends cleanly.
 4. PLAN BRIEFLY. On your first turn, state a 2-5 step plan in plain text, then begin executing it.
 5. VERIFY YOUR WORK. Run the project's tests, build or linter when they exist. If a command fails, read the error, fix the cause, and run it again.
 6. DO NOT REPEAT FAILED STEPS. If an action failed, change your approach rather than retrying it identically.
 7. CHECKPOINT BEFORE RISKY WORK. Call create_checkpoint before a batch of related edits.
-8. STOP WHEN DONE. Call \`finish\` with an honest summary. Set verified: true only if you actually ran tests or a build and they passed.
+8. DO NOT CONFUSE INSPECTION WITH COMPLETION. For a task asking you to create, fix, or change something, a file listing or checkpoint is not enough — make a successful file or folder change before finishing. Seeing only a package-lock file is not proof the requested feature cannot be created.
+9. STOP WHEN DONE. Call \`finish\` with an honest summary. Set verified: true only if you actually ran tests or a build and they passed.
 
 Be concise. Do not narrate every tool call at length, and be honest about what did not work.`;
 
@@ -97,9 +118,37 @@ export const TOOL_DEFS = [
     {
         type: 'function',
         function: {
+            name: 'append_file',
+            description:
+                'Append text to the end of a file, creating it if it does not exist. Use this to build a large file in a few small tool calls instead of one enormous write_file.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    path: { type: 'string' },
+                    content: { type: 'string', description: 'Text to append. Include its own trailing newline if needed.' },
+                },
+                required: ['path', 'content'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'create_folder',
+            description: 'Create a directory (and any missing parents) inside the workspace.',
+            parameters: {
+                type: 'object',
+                properties: { path: { type: 'string', description: 'Directory path relative to the workspace root.' } },
+                required: ['path'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'edit_file',
             description:
-                'Replace an exact snippet in an existing file. The safe way to modify code. old_string must appear exactly once unless replace_all is true.',
+                'Replace an exact snippet in an existing file. If it occurs more than once, use the 1-based occurrence number from the error context, or provide more surrounding text. Use replace_all only when every match should change.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -107,6 +156,7 @@ export const TOOL_DEFS = [
                     old_string: { type: 'string' },
                     new_string: { type: 'string' },
                     replace_all: { type: 'boolean' },
+                    occurrence: { type: 'integer', description: '1-based matching occurrence to replace when old_string is repeated. Do not combine with replace_all.' },
                 },
                 required: ['path', 'old_string', 'new_string'],
             },
@@ -125,6 +175,36 @@ export const TOOL_DEFS = [
                     reason: { type: 'string', description: 'One line on why the file should be removed.' },
                 },
                 required: ['path'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'rename_file',
+            description: 'Rename or move a file inside the workspace. Refused if the destination already exists.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    old_path: { type: 'string' },
+                    new_path: { type: 'string' },
+                },
+                required: ['old_path', 'new_path'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'copy_file',
+            description: 'Copy a file inside the workspace. Refused if the destination already exists.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    source_path: { type: 'string' },
+                    dest_path: { type: 'string' },
+                },
+                required: ['source_path', 'dest_path'],
             },
         },
     },
@@ -158,7 +238,7 @@ export const TOOL_DEFS = [
         function: {
             name: 'finish',
             description:
-                'Signal the task is complete, with an honest summary. Set verified: true only if tests/build actually passed.',
+                'Signal the task is complete, with an honest summary. For create/fix/change tasks, a successful file or folder change is required before finishing. Set verified: true only if tests/build actually passed.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -205,17 +285,32 @@ function signatureOf(name: string, args: any): string {
     const a = args ?? {};
     switch (name) {
         case 'read_file':
-            return `read_file:${a.path}`;
+            // A different slice of the same file is a different request.
+            return `read_file:${a.path}:${a.start ?? ''}-${a.end ?? ''}`;
         case 'edit_file':
-            return `edit_file:${a.path}::${String(a.old_string ?? '').slice(0, 80)}`;
+            return `edit_file:${a.path}:${signatureDigest(JSON.stringify([
+                a.old_string,
+                a.new_string,
+                Boolean(a.replace_all),
+                a.occurrence ?? null,
+            ]))}`;
         case 'write_file':
-            return `write_file:${a.path}`;
+            // Same path with different content is new work; identical content is a no-op.
+            return `write_file:${a.path}:${signatureDigest(String(a.content ?? ''))}:${a.overwrite ? 'overwrite' : 'create'}`;
+        case 'append_file':
+            return `append_file:${a.path}:${signatureDigest(String(a.content ?? ''))}`;
         case 'delete_file':
             return `delete_file:${a.path}`;
+        case 'create_folder':
+            return `create_folder:${a.path}`;
+        case 'rename_file':
+            return `rename_file:${a.old_path}->${a.new_path}`;
+        case 'copy_file':
+            return `copy_file:${a.source_path}->${a.dest_path}`;
         case 'run_command':
             return `run_command:${String(a.command ?? '').trim()}`;
         case 'search_code':
-            return `search_code:${a.query}`;
+            return `search_code:${a.query}:${a.isRegex ? 'regex' : 'literal'}`;
         case 'list_files':
             return `list_files:${a.path ?? '.'}`;
         case 'create_checkpoint':
@@ -236,7 +331,7 @@ export interface ApprovalRequest {
 export interface AgentCallbacks {
     onPhase: (phase: string) => void;
     onStatus: (text: string) => void;
-    onAssistantText: (text: string) => void;
+    onAssistantText: (text: string, repeated?: boolean) => void;
     onAssistantDelta: (delta: string) => void;
     onToolCall: (call: { id: string; name: string; args: any }) => void;
     onToolResult: (result: { id: string; name: string; ok: boolean; output: string; diff?: DiffResult | null }) => void;
@@ -249,6 +344,8 @@ export interface AgentCallbacks {
 export interface RunResult {
     status: 'done' | 'aborted' | 'failed';
     summary: string;
+    /** Stable failure code; null for a clean finish. */
+    code: string | null;
     steps: any[];
     checkpoints: { id: string; label: string; timestamp: number; fileCount: number }[];
 }
@@ -265,123 +362,249 @@ export async function runAgent(opts: {
 }): Promise<RunResult> {
     const { task, workspace, provider, signal, callbacks, autonomy = AUTONOMY.ASK } = opts;
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri;
+    const effectiveTask = resolveContinuationTask(task, opts.priorMessages ?? []);
 
     const memory = {
         steps: [] as any[],
-        attempts: new Map<string, { count: number; failed: boolean }>(),
+        attempts: new Map<string, { count: number; failed: boolean; denied?: boolean; progressVersion?: number }>(),
         checkpoints: [] as { id: string; label: string; timestamp: number; fileCount: number }[],
         alwaysAllow: new Set<string>(),
         touched: new Set<string>(),
+        // How many times the workspace has actually changed; a failed step may be
+        // retried once the workspace differs, but not against an unchanged one.
+        progressVersion: 0,
+        usedToolCallIds: new Set<string>(),
+        toolCallSeq: 0,
     };
+    let noActionTurns = 0;
+    let identicalNoActionResponses = 0;
+    let lastAssistantText = '';
+    let finalStepRequested = false;
 
     const messages: any[] = [
         { role: 'system', content: AGENT_SYSTEM_PROMPT },
-        ...(opts.priorMessages ?? []).slice(-12),
+        ...(opts.priorMessages ?? [])
+            .slice(-12)
+            .map((message) => ({
+                role: message.role,
+                content: message.role === 'assistant'
+                    ? sanitizeAssistantOutput(String(message.content ?? ''))
+                    : String(message.content ?? ''),
+            }))
+            .filter((message) => message.content),
         {
             role: 'user',
-            content: `Task: ${task}\n\nStart by inspecting the workspace, then state a short plan and execute it.`,
+            content: taskRequiresWorkspaceChange(effectiveTask)
+                ? `Task: ${effectiveTask}\n\nStart by inspecting the workspace, then state a short plan and execute it.`
+                : `Task: ${effectiveTask}\n\nIf this needs project-specific facts, inspect the relevant files first. Otherwise, answer directly. Do not invent workspace changes; finish with your answer.`,
         },
     ];
 
     callbacks.onPhase('inspect');
     callbacks.onStatus('Inspecting the workspace…');
 
+    let lastMutationStep = 0;
+    const startedAt = Date.now();
+
     for (let step = 0; step < MAX_STEPS; step++) {
+        if (Date.now() - startedAt > RUN_BUDGET_MS) {
+            const budgetSummary = `Stopped after ${Math.round(RUN_BUDGET_MS / 60000)} minutes; the run exceeded its time budget.`;
+            callbacks.onReminder(budgetSummary);
+            callbacks.onPhase('done');
+            return { status: 'failed', summary: budgetSummary, code: ERROR_CODES.TIME_BUDGET, steps: memory.steps, checkpoints: memory.checkpoints };
+        }
         if (signal.aborted) {
             callbacks.onPhase('done');
-            return { status: 'aborted', summary: 'Stopped by user.', steps: memory.steps, checkpoints: memory.checkpoints };
+            return { status: 'aborted', summary: 'Stopped by user.', code: ERROR_CODES.ABORTED, steps: memory.steps, checkpoints: memory.checkpoints };
         }
 
-        let result;
-        try {
-            result = await streamCompletion({
+        // Ask the model to wrap up before the hard step budget runs out, once.
+        if (!finalStepRequested && step === MAX_STEPS - 1) {
+            finalStepRequested = true;
+            messages.push({
+                role: 'user',
+                content:
+                    'This is your final step. Either call one more tool that completes the requested work, or call `finish` with an honest summary of what changed and what you verified.',
+            });
+        }
+
+        const generation = await generateWithRetry({
+            signal,
+            callbacks,
+            request: {
                 providerId: provider.providerId,
                 baseUrl: provider.baseUrl,
                 apiKey: provider.apiKey,
                 model: provider.model,
-                messages: buildRequestMessages(messages, memory),
+                messages: ensureToolResultPairing(buildRequestMessages(messages, memory)),
                 tools: TOOL_DEFS,
                 signal,
-                onToken: (delta) => callbacks.onAssistantDelta(delta),
-            });
-        } catch (error: any) {
-            if (error?.name === 'AbortError' || signal.aborted) {
-                callbacks.onPhase('done');
-                return { status: 'aborted', summary: 'Stopped by user.', steps: memory.steps, checkpoints: memory.checkpoints };
-            }
-            return { status: 'failed', summary: error.message, steps: memory.steps, checkpoints: memory.checkpoints };
-        }
-
-        const { content, toolCalls } = result;
-
-        messages.push({
-            role: 'assistant',
-            content: content || null,
-            ...(toolCalls.length
-                ? {
-                    tool_calls: toolCalls.map((tc) => ({
-                        id: tc.id,
-                        type: 'function',
-                        function: { name: tc.name, arguments: JSON.stringify(tc.args) },
-                    })),
-                }
-                : {}),
+            },
         });
+        if (generation.aborted) {
+            callbacks.onPhase('done');
+            return { status: 'aborted', summary: 'Stopped by user.', code: ERROR_CODES.ABORTED, steps: memory.steps, checkpoints: memory.checkpoints };
+        }
+        if (!generation.result) {
+            const message = generation.error?.message ?? 'The model request failed.';
+            return { status: 'failed', summary: message, code: classifyModelError(message), steps: memory.steps, checkpoints: memory.checkpoints };
+        }
+        const result = generation.result;
 
+        const toolCalls = (result.toolCalls ?? []).map((call: ToolCall) => normalizeToolCallForRun(call, memory, cwd?.fsPath));
+        const content = sanitizeAssistantOutput(result.content);
+
+        let repeatedText = false;
         if (content?.trim()) {
-            callbacks.onAssistantText(content.trim());
+            const normalizedText = normalizeAssistantText(content);
+            repeatedText = Boolean(normalizedText && normalizedText === lastAssistantText);
+            callbacks.onAssistantText(content.trim(), repeatedText);
+            lastAssistantText = normalizedText;
             if (step === 0) {
                 callbacks.onPhase('plan');
             }
+        } else {
+            lastAssistantText = '';
+        }
+
+        // Record the assistant turn, including tool calls. A repeated narration with
+        // no tool calls is not appended again: echoing it back teaches small models
+        // to keep repeating, and it is already in the transcript.
+        if (toolCalls.length || (content.trim() && !repeatedText)) {
+            messages.push({
+                role: 'assistant',
+                content: content || null,
+                ...(toolCalls.length
+                    ? {
+                        tool_calls: toolCalls.map((tc) => ({
+                            id: tc.id,
+                            type: 'function',
+                            function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+                        })),
+                    }
+                    : {}),
+            });
         }
 
         if (!toolCalls.length) {
-            const finished = /^(done|finished|complete)/i.test(content ?? '');
-            // Only accept a bare "done" once real work has happened. A model that says
-            // "Done." before touching anything has not done the task.
-            if ((finished && memory.steps.length > 0) || step === MAX_STEPS - 1) {
+            if (!taskRequiresWorkspaceChange(effectiveTask) && content.trim()) {
                 callbacks.onPhase('done');
                 return {
                     status: 'done',
-                    summary: content?.trim() || 'Completed.',
+                    summary: content.trim(),
+                    code: null,
+                    steps: memory.steps,
+                    checkpoints: memory.checkpoints,
+                };
+            }
+            noActionTurns += 1;
+            identicalNoActionResponses = repeatedText ? identicalNoActionResponses + 1 : 0;
+            // Remove the echoed reply so the model cannot simply copy it again.
+            if (repeatedText) {
+                dropLastAssistantText(messages);
+            }
+            // The requested change already landed; the model is describing it rather
+            // than calling `finish`. End with its summary instead of failing the run.
+            const missing = await missingRequestedPaths(effectiveTask, workspace);
+            const completedSoFar = taskRequiresWorkspaceChange(effectiveTask)
+                && memory.steps.some((record) => MUTATING_TOOLS.includes(record.name) && record.ok)
+                && missing.length === 0;
+            if (missing.length) {
+                callbacks.onReminder(`Still missing: ${missing.join(', ')}. Create ${missing.length === 1 ? 'it' : 'them'} before describing the task as complete.`);
+            }
+            if (completedSoFar && (repeatedText || noActionTurns >= 2)) {
+                const summary = content.trim() || 'Completed the requested changes.';
+                callbacks.onReminder('The model described the result instead of calling `finish`; ending the run with its summary.');
+                callbacks.onPhase('done');
+                return { status: 'done', summary, code: null, steps: memory.steps, checkpoints: memory.checkpoints };
+            }
+            const repeatedOutOfBudget = repeatedText && identicalNoActionResponses + 1 >= MAX_IDENTICAL_RESPONSES;
+            if (repeatedOutOfBudget || noActionTurns >= MAX_NO_ACTION_TURNS) {
+                if (missing.length) {
+                    const missingSummary = `Stopped without creating ${missing.join(', ')}. The model described the result instead of finishing the requested work.`;
+                    callbacks.onReminder(missingSummary);
+                    callbacks.onPhase('done');
+                    return { status: 'failed', summary: missingSummary, code: ERROR_CODES.MISSING_FILES, steps: memory.steps, checkpoints: memory.checkpoints };
+                }
+                const toolHint = memory.steps.length === 0
+                    ? ' The model made no tool calls at all, which usually means it does not support tool calling — choose a tool-capable model, or restate the task with concrete file names.'
+                    : '';
+                const summary = (repeatedText
+                    ? `Stopped after ${identicalNoActionResponses + 1} identical responses without a tool action; the model kept repeating itself.`
+                    : `Stopped after ${MAX_NO_ACTION_TURNS} responses without a tool action.`) + toolHint;
+                callbacks.onReminder(summary);
+                callbacks.onPhase('done');
+                return {
+                    status: 'failed',
+                    summary,
+                    code: repeatedText ? ERROR_CODES.IDENTICAL_RESPONSES : ERROR_CODES.NO_ACTION,
                     steps: memory.steps,
                     checkpoints: memory.checkpoints,
                 };
             }
             messages.push({
                 role: 'user',
-                content:
-                    'You described an action but did not perform it. Do not narrate what you would do — ' +
-                    'call the tool NOW to actually do it (write_file with the full contents, or ' +
-                    'edit_file with the exact old_string/new_string). If the task is genuinely ' +
-                    'complete, call `finish`.',
+                content: repeatedText
+                    ? 'You repeated the same message instead of acting, so it was removed. Do not restate it. Your next reply must be exactly one tool call and no prose — call the relevant tool now to make progress.'
+                    : 'You described an action but did not perform it. Do not narrate what you would do — call the tool NOW to actually do it (write_file with the full contents, or edit_file with the exact old_string/new_string). If the task is genuinely complete, call `finish`.',
             });
             continue;
         }
+        noActionTurns = 0;
+        identicalNoActionResponses = 0;
 
         for (const call of toolCalls) {
             if (signal.aborted) {
                 callbacks.onPhase('done');
-                return { status: 'aborted', summary: 'Stopped by user.', steps: memory.steps, checkpoints: memory.checkpoints };
+                return { status: 'aborted', summary: 'Stopped by user.', code: ERROR_CODES.ABORTED, steps: memory.steps, checkpoints: memory.checkpoints };
             }
 
             const signature = signatureOf(call.name, call.args);
             const prior = memory.attempts.get(signature);
+            // Block a call already attempted against this exact workspace state. A
+            // user-denied action stays blocked; a failed one may be retried once the
+            // workspace has changed (re-running tests after a fix is the verify loop).
+            const sameWorkspaceSinceAttempt = prior && prior.progressVersion === memory.progressVersion;
 
-            if (prior?.failed) {
+            if (prior?.denied || sameWorkspaceSinceAttempt) {
                 const note =
-                    `You already tried \`${signature}\` and it failed. Do not repeat it. ` +
-                    `Change your approach — re-read the file, use more context, or try a different method.`;
+                    `BLOCKED: \`${signature}\` was already attempted with this unchanged workspace. ` +
+                    `Use the result already in context or choose a materially different action.`;
                 callbacks.onReminder(note);
+                callbacks.onToolResult({ id: call.id, name: call.name, ok: false, output: note });
                 messages.push({ role: 'tool', tool_call_id: call.id, content: note });
                 continue;
             }
-            memory.attempts.set(signature, { count: (prior?.count ?? 0) + 1, failed: false });
+            memory.attempts.set(signature, {
+                count: (prior?.count ?? 0) + 1,
+                failed: false,
+                progressVersion: memory.progressVersion,
+            });
 
             if (call.name === 'finish') {
+                const hasSuccessfulMutation = memory.steps.some((record) => MUTATING_TOOLS.includes(record.name) && record.ok);
+                const missing = await missingRequestedPaths(effectiveTask, workspace);
+                if (taskRequiresWorkspaceChange(effectiveTask) && (!hasSuccessfulMutation || missing.length)) {
+                    const note =
+                        'Finish refused: this task asks for a workspace change, but no file or folder change has succeeded. ' +
+                        (missing.length
+                            ? `The task also names ${missing.join(', ')}, which ${missing.length === 1 ? 'does not exist' : 'do not exist'} yet. `
+                            : '') +
+                        'A file listing or checkpoint alone is not completion. Inspect the relevant files, make the requested change, and verify it before finishing.';
+                    callbacks.onToolCall({ id: call.id, name: call.name, args: call.args });
+                    callbacks.onReminder(note);
+                    callbacks.onToolResult({ id: call.id, name: call.name, ok: false, output: note });
+                    callbacks.onPhase('act');
+                    messages.push({ role: 'tool', tool_call_id: call.id, content: note });
+                    messages.push({
+                        role: 'user',
+                        content: 'Continue the requested implementation. Do not create another checkpoint or call finish until a file or folder change succeeds.',
+                    });
+                    continue;
+                }
                 const summary = call.args?.summary ?? 'Completed.';
                 callbacks.onPhase('done');
-                return { status: 'done', summary, steps: memory.steps, checkpoints: memory.checkpoints };
+                return { status: 'done', summary, code: null, steps: memory.steps, checkpoints: memory.checkpoints };
             }
 
             const approvalKey = approvalKeyFor(call);
@@ -399,7 +622,7 @@ export async function runAgent(opts: {
                 }
                 if (!decision.approved) {
                     const note = `The user DENIED this action: ${call.name}. Do not retry it. Propose an alternative or stop and ask.`;
-                    memory.attempts.set(signature, { count: 1, failed: true });
+                    memory.attempts.set(signature, { count: 1, failed: true, denied: true, progressVersion: memory.progressVersion });
                     callbacks.onToolResult({ id: call.id, name: call.name, ok: false, output: note });
                     messages.push({ role: 'tool', tool_call_id: call.id, content: note });
                     continue;
@@ -408,7 +631,7 @@ export async function runAgent(opts: {
 
             callbacks.onToolCall({ id: call.id, name: call.name, args: call.args });
 
-            const outcome = await executeTool(call, {
+            let outcome = await executeTool(call, {
                 workspace,
                 memory,
                 callbacks,
@@ -416,9 +639,33 @@ export async function runAgent(opts: {
                 signal,
             });
 
+            // A tool reporting success is not proof the file changed on disk.
+            if (outcome.ok && MUTATING_TOOLS.includes(call.name)) {
+                const verification = await verifyMutation(call, workspace);
+                if (!verification.ok) {
+                    outcome = {
+                        ...outcome,
+                        ok: false,
+                        output: `${outcome.output}\n\nVERIFICATION FAILED: ${verification.reason}`,
+                    };
+                }
+            }
+
             if (!outcome.ok) {
-                memory.attempts.set(signature, { count: (prior?.count ?? 0) + 1, failed: true });
+                memory.attempts.set(signature, {
+                    count: (prior?.count ?? 0) + 1,
+                    failed: true,
+                    progressVersion: memory.progressVersion,
+                });
                 callbacks.onPhase('recover');
+            } else if (MUTATING_TOOLS.includes(call.name)) {
+                lastMutationStep = step;
+                memory.progressVersion += 1;
+                memory.attempts.set(signature, {
+                    count: (prior?.count ?? 0) + 1,
+                    failed: false,
+                    progressVersion: memory.progressVersion,
+                });
             }
             if (call.name === 'run_command') {
                 callbacks.onPhase('verify');
@@ -443,10 +690,17 @@ export async function runAgent(opts: {
             });
             messages.push({ role: 'tool', tool_call_id: call.id, content: truncate(outcome.output, 6000) });
         }
+
+        if (taskRequiresWorkspaceChange(effectiveTask) && step - lastMutationStep >= MAX_STALLED_STEPS) {
+            const summary = `Stopped after ${MAX_STALLED_STEPS} steps without changing the workspace. The requested change was not made.`;
+            callbacks.onReminder(summary);
+            callbacks.onPhase('done');
+            return { status: 'failed', summary, code: ERROR_CODES.STALLED, steps: memory.steps, checkpoints: memory.checkpoints };
+        }
     }
 
     const summary = `Stopped after ${MAX_STEPS} steps without an explicit finish.`;
-    return { status: 'failed', summary, steps: memory.steps, checkpoints: memory.checkpoints };
+    return { status: 'failed', summary, code: ERROR_CODES.STEP_LIMIT, steps: memory.steps, checkpoints: memory.checkpoints };
 }
 
 /**
@@ -456,7 +710,7 @@ export async function runAgent(opts: {
  * and deletes but still confirms unusual commands.
  */
 function requiresApproval(call: ToolCall, autonomy: Autonomy = AUTONOMY.ASK): boolean {
-    const mutates = call.name === 'write_file' || call.name === 'edit_file' || call.name === 'delete_file';
+    const mutates = MUTATING_TOOLS.includes(call.name);
     const deletesFile = call.name === 'delete_file';
     const runsCommand = call.name === 'run_command';
     if (!mutates && !runsCommand) {
@@ -468,7 +722,7 @@ function requiresApproval(call: ToolCall, autonomy: Autonomy = AUTONOMY.ASK): bo
     if (autonomy === AUTONOMY.AUTO_EDIT) {
         // auto-edit trusts edits, not deletions. Removing a whole file stays behind
         // the approval prompt unless the run is explicitly `full`.
-        if (deletesFile) {
+        if (deletesFile || call.name === 'rename_file') {
             return true;
         }
         return runsCommand && !isSafeCommand(call.args?.command ?? '');
@@ -479,6 +733,13 @@ function requiresApproval(call: ToolCall, autonomy: Autonomy = AUTONOMY.ASK): bo
 function approvalKeyFor(call: ToolCall): string {
     if (call.name === 'run_command') {
         return `run_command:${String(call.args?.command ?? '').trim()}`;
+    }
+    // Consent for one rename/copy is never silently reused for another file.
+    if (call.name === 'rename_file') {
+        return `rename_file:${call.args?.old_path ?? ''}->${call.args?.new_path ?? ''}`;
+    }
+    if (call.name === 'copy_file') {
+        return `copy_file:${call.args?.source_path ?? ''}->${call.args?.dest_path ?? ''}`;
     }
     return call.name;
 }
@@ -493,7 +754,15 @@ async function executeTool(
         signal: AbortSignal;
     },
 ): Promise<{ ok: boolean; output: string; diff?: DiffResult | null }> {
+    call = canonicalizeToolCall(call);
     const args = call.args ?? {};
+    if (args.__parseError) {
+        return {
+            ok: false,
+            output:
+                'Your tool-call arguments were not valid JSON, so nothing was executed. Re-issue the call with a well-formed arguments object.',
+        };
+    }
     try {
         switch (call.name) {
             case 'list_files': {
@@ -507,6 +776,8 @@ async function executeTool(
                 return { ok: true, output: await ctx.workspace.search(args.query, Boolean(args.isRegex)) };
             }
             case 'write_file': {
+                const tooLarge = writeChunkLimit(args.content);
+                if (tooLarge) return { ok: false, output: tooLarge };
                 const outcome = await ctx.workspace.write(args.path, args.content, Boolean(args.overwrite));
                 ctx.memory.touched.add(outcome.path);
                 const verb = outcome.before ? 'Rewrote' : 'Created';
@@ -522,6 +793,7 @@ async function executeTool(
                     args.old_string,
                     args.new_string,
                     Boolean(args.replace_all),
+                    args.occurrence,
                 );
                 ctx.memory.touched.add(outcome.path);
                 return {
@@ -537,6 +809,40 @@ async function executeTool(
                     ok: true,
                     diff: outcome.diff,
                     output: `Deleted ${outcome.path} (-${outcome.diff.removed} lines).`,
+                };
+            }
+            case 'append_file': {
+                const tooLarge = writeChunkLimit(args.content);
+                if (tooLarge) return { ok: false, output: tooLarge };
+                const outcome = await ctx.workspace.append(args.path, args.content);
+                ctx.memory.touched.add(outcome.path);
+                return {
+                    ok: true,
+                    diff: outcome.diff,
+                    output: `Appended to ${outcome.path} (+${outcome.diff.added} / -${outcome.diff.removed} lines).`,
+                };
+            }
+            case 'create_folder': {
+                const outcome = await ctx.workspace.createFolder(args.path);
+                return {
+                    ok: true,
+                    output: outcome.created
+                        ? `Created folder ${outcome.path}.`
+                        : `Folder ${outcome.path} already existed.`,
+                };
+            }
+            case 'rename_file': {
+                const outcome = await ctx.workspace.rename(args.old_path, args.new_path);
+                ctx.memory.touched.add(outcome.path);
+                return { ok: true, diff: outcome.diff, output: `Renamed ${args.old_path} to ${outcome.path}.` };
+            }
+            case 'copy_file': {
+                const outcome = await ctx.workspace.copy(args.source_path, args.dest_path);
+                ctx.memory.touched.add(outcome.path);
+                return {
+                    ok: true,
+                    diff: outcome.diff,
+                    output: `Copied ${args.source_path} to ${outcome.path} (+${outcome.diff.added} lines).`,
                 };
             }
             case 'create_checkpoint': {
@@ -564,7 +870,10 @@ async function executeTool(
                 return { ok: res.exitCode === 0, output };
             }
             default:
-                return { ok: false, output: `Unknown tool: ${call.name}` };
+                return {
+                    ok: false,
+                    output: `Unsupported tool "${call.name}". Available tools: ${TOOL_DEFS.map((tool) => tool.function.name).join(', ')}. Use write_file with path and content to create a file, or create_folder with path to create a directory.`,
+                };
         }
     } catch (error: any) {
         return { ok: false, output: `ERROR: ${error.message}` };
@@ -611,7 +920,6 @@ export async function runShellCommand(
 
     const exitCode = await new Promise<number>((resolve) => {
         let settled = false;
-        let timeout: NodeJS.Timeout;
         const cancel = (): void => {
             terminal.dispose();
             finish(130);
@@ -625,7 +933,7 @@ export async function runShellCommand(
             signal.removeEventListener('abort', cancel);
             resolve(code);
         };
-        timeout = setTimeout(() => finish(124), 120_000);
+        const timeout = setTimeout(() => finish(124), 120_000);
         signal.addEventListener('abort', cancel);
         closeEmitter.event((code) => finish(code ?? 0));
     });
@@ -640,22 +948,298 @@ function stripAnsi(text: string): string {
     return text.replace(/\u001b\[[0-9;]*m/g, '');
 }
 
+/**
+ * Inject failure memory into the request so the model sees what it must not repeat.
+ *
+ * The reminder goes immediately after the system prompt. Inserting it later can
+ * split an assistant `tool_calls` message from its `tool` results, and a provider
+ * rejects that transcript — costing the model every result it needs to continue.
+ */
 function buildRequestMessages(messages: any[], memory: any): any[] {
-    const failures = [...memory.attempts.entries()]
-        .filter(([, v]: any) => v.failed)
-        .map(([sig]) => `- ${sig}`);
-    if (!failures.length) {
-        return messages;
+    const kept = messages.filter((message) => !isFailureReminder(message));
+    const reminder = failureReminder(memory);
+    if (!reminder) {
+        return kept;
     }
-    const reminder = {
+    const [system, ...rest] = kept;
+    return system ? [system, reminder, ...rest] : [reminder, ...kept];
+}
+
+function isFailureReminder(message: any): boolean {
+    return (
+        message?.role === 'system' &&
+        typeof message.content === 'string' &&
+        message.content.startsWith(FAILURE_REMINDER_PREFIX)
+    );
+}
+
+function failureReminder(memory: any): any | null {
+    const failures = [...memory.attempts.entries()]
+        .filter(([, value]: any) => value.failed)
+        .map(([signature]) => `- ${signature}`);
+    if (!failures.length) {
+        return null;
+    }
+    return {
         role: 'system',
         content:
-            'Actions you have ALREADY TRIED AND FAILED — never repeat these exact calls:\n' +
+            `${FAILURE_REMINDER_PREFIX} — never repeat these exact calls:\n` +
             failures.join('\n') +
             '\nTake a different approach for each.',
     };
-    const [system, ...rest] = messages;
-    return [system, ...rest.slice(0, -2), reminder, ...rest.slice(-2)];
+}
+
+/**
+ * Guarantee one tool result per tool call id, in order. A transcript where a tool
+ * call has no result is rejected by OpenAI-compatible servers, so any gap is filled
+ * rather than losing the run to a protocol error.
+ */
+function ensureToolResultPairing(messages: any[]): any[] {
+    const out: any[] = [];
+    for (let index = 0; index < messages.length; index++) {
+        const message = messages[index];
+        out.push(message);
+        if (message.role !== 'assistant' || !Array.isArray(message.tool_calls) || !message.tool_calls.length) {
+            continue;
+        }
+        const answered = new Set<string>();
+        let next = index + 1;
+        while (next < messages.length && messages[next]?.role === 'tool') {
+            answered.add(messages[next].tool_call_id);
+            out.push(messages[next]);
+            next++;
+        }
+        for (const call of message.tool_calls) {
+            if (answered.has(call.id)) {
+                continue;
+            }
+            out.push({ role: 'tool', tool_call_id: call.id, content: 'No result was recorded for this call.' });
+        }
+        index = next - 1;
+    }
+    return out;
+}
+
+/** Bounded retry on transient transport/server failures. */
+async function generateWithRetry(opts: {
+    request: Parameters<typeof streamCompletion>[0];
+    signal: AbortSignal;
+    callbacks: AgentCallbacks;
+}): Promise<{
+    result: Awaited<ReturnType<typeof streamCompletion>> | null;
+    error: Error | null;
+    aborted: boolean;
+}> {
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt <= MAX_MODEL_RETRIES; attempt++) {
+        if (opts.signal.aborted) {
+            return { result: null, error: null, aborted: true };
+        }
+        try {
+            return { result: await streamCompletion(opts.request), error: null, aborted: false };
+        } catch (error: any) {
+            if (error?.name === 'AbortError' || opts.signal.aborted) {
+                return { result: null, error: null, aborted: true };
+            }
+            lastError = error instanceof Error ? error : new Error(String(error?.message ?? error));
+            if (attempt >= MAX_MODEL_RETRIES || !isRetryableModelError(lastError)) {
+                break;
+            }
+            opts.callbacks.onStatus(
+                `The model request failed (${lastError.message}); retrying (${attempt + 1}/${MAX_MODEL_RETRIES})…`,
+            );
+            await delay(120 * 2 ** attempt);
+        }
+    }
+    return { result: null, error: lastError ?? new Error('The model request failed.'), aborted: false };
+}
+
+function isRetryableModelError(error: Error): boolean {
+    return /could not reach|network|fetch failed|econnreset|etimedout|eai_again|socket hang up|provider error (?:429|5\d\d)/i.test(
+        error.message,
+    );
+}
+
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Tool arguments that name a workspace path. */
+const PATH_ARGUMENTS: Record<string, string[]> = {
+    list_files: ['path'],
+    read_file: ['path'],
+    write_file: ['path'],
+    edit_file: ['path'],
+    delete_file: ['path'],
+};
+
+/**
+ * Canonicalise name, path arguments and id before anything else sees the call, so
+ * signatures, approvals, transcripts and tool results all refer to the same file
+ * and the same call.
+ */
+function normalizeToolCallForRun(
+    call: ToolCall,
+    memory: { usedToolCallIds: Set<string>; toolCallSeq: number },
+    rootFsPath?: string,
+): ToolCall {
+    const normalized = canonicalizeToolCall(call);
+    const keys = PATH_ARGUMENTS[normalized.name];
+    let args = normalized.args ?? {};
+    if (keys) {
+        let changed = false;
+        args = { ...args };
+        for (const key of keys) {
+            const value = args[key];
+            if (typeof value !== 'string') {
+                continue;
+            }
+            const next = toWorkspaceRelative(value, rootFsPath);
+            if (next !== value) {
+                args[key] = next;
+                changed = true;
+            }
+        }
+        if (!changed) {
+            args = normalized.args ?? {};
+        }
+    }
+
+    let id = typeof normalized.id === 'string' && normalized.id.trim() ? normalized.id.trim() : '';
+    if (!id || memory.usedToolCallIds.has(id)) {
+        memory.toolCallSeq += 1;
+        id = `call_${memory.toolCallSeq}`;
+        while (memory.usedToolCallIds.has(id)) {
+            memory.toolCallSeq += 1;
+            id = `call_${memory.toolCallSeq}`;
+        }
+    }
+    memory.usedToolCallIds.add(id);
+    return { ...normalized, id, args };
+}
+
+/** Normalise a model path, stripping a known workspace-root prefix. */
+function toWorkspaceRelative(path: string, rootFsPath?: string): string {
+    let value = String(path ?? '').trim();
+    const quoted = value.match(/^([`'"])([\s\S]*)\1$/);
+    if (quoted) {
+        value = quoted[2].trim();
+    }
+    value = value.replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+    const root = rootFsPath?.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (root && value.toLowerCase().startsWith(`${root.toLowerCase()}/`)) {
+        value = value.slice(root.length + 1);
+    }
+    while (value.startsWith('./')) {
+        value = value.slice(2);
+    }
+    return value.replace(/\/\.\//g, '/');
+}
+
+/**
+ * Confirm a mutation really landed on disk, so a silently dropped or truncated
+ * write becomes a retryable failure instead of a false success the model builds on.
+ */
+async function verifyMutation(
+    call: ToolCall,
+    workspace: VsCodeWorkspace,
+): Promise<{ ok: boolean; reason?: string }> {
+    const args = call.args ?? {};
+    const readback = async (path: string): Promise<string | null> => {
+        try {
+            return await workspace.read(path);
+        } catch {
+            return null;
+        }
+    };
+
+    try {
+        if (call.name === 'write_file') {
+            const path = String(args.path ?? '');
+            const actual = await readback(path);
+            if (actual === null) {
+                return { ok: false, reason: `write_file reported success but ${path} does not exist on disk. Write it again.` };
+            }
+            if (comparableContent(actual) !== comparableContent(args.content)) {
+                return {
+                    ok: false,
+                    reason: `write_file reported success but ${path} does not match the content you sent. Read the file and write it again.`,
+                };
+            }
+            return { ok: true };
+        }
+
+        if (call.name === 'edit_file') {
+            const path = String(args.path ?? '');
+            const actual = await readback(path);
+            if (actual === null) {
+                return { ok: false, reason: `edit_file reported success but ${path} does not exist on disk.` };
+            }
+            const replacement = String(args.new_string ?? '').replace(/\r\n/g, '\n');
+            if (replacement && !actual.replace(/\r\n/g, '\n').includes(replacement)) {
+                return {
+                    ok: false,
+                    reason: `edit_file reported success but the new text is not present in ${path}. Re-read the file and retry with an exact snippet.`,
+                };
+            }
+            return { ok: true };
+        }
+
+        if (call.name === 'delete_file') {
+            const path = String(args.path ?? '');
+            if ((await readback(path)) !== null) {
+                return { ok: false, reason: `delete_file reported success but ${path} still exists on disk.` };
+            }
+            return { ok: true };
+        }
+
+        if (call.name === 'rename_file') {
+            const newPath = String(args.new_path ?? '');
+            const oldPath = String(args.old_path ?? '');
+            if ((await readback(newPath)) === null) {
+                return { ok: false, reason: `rename_file reported success but ${newPath} does not exist on disk.` };
+            }
+            if ((await readback(oldPath)) !== null) {
+                return { ok: false, reason: `rename_file reported success but ${oldPath} still exists on disk.` };
+            }
+            return { ok: true };
+        }
+
+        if (call.name === 'copy_file') {
+            const destPath = String(args.dest_path ?? '');
+            const actual = await readback(destPath);
+            if (actual === null) {
+                return { ok: false, reason: `copy_file reported success but ${destPath} does not exist on disk.` };
+            }
+            const source = await readback(String(args.source_path ?? ''));
+            if (source !== null && comparableContent(actual) !== comparableContent(source)) {
+                return { ok: false, reason: `copy_file reported success but ${destPath} does not match ${args.source_path}.` };
+            }
+            return { ok: true };
+        }
+
+        if (call.name === 'append_file') {
+            const path = String(args.path ?? '');
+            const actual = await readback(path);
+            if (actual === null) {
+                return { ok: false, reason: `append_file reported success but ${path} does not exist.` };
+            }
+            const appended = String(args.content ?? '').replace(/\r\n/g, '\n');
+            if (appended && !actual.replace(/\r\n/g, '\n').includes(appended)) {
+                return { ok: false, reason: `append_file reported success but the appended text is not present in ${path}.` };
+            }
+            return { ok: true };
+        }
+
+        return { ok: true };
+    } catch (error: any) {
+        return { ok: false, reason: `${call.name} could not be verified: ${error?.message ?? 'unknown error'}` };
+    }
+}
+
+/** Compare file contents ignoring line-ending and trailing-whitespace differences. */
+function comparableContent(text: unknown): string {
+    return String(text ?? '').replace(/\r\n/g, '\n').replace(/\s+$/, '');
 }
 
 function truncate(text: string, max: number): string {
@@ -663,4 +1247,66 @@ function truncate(text: string, max: number): string {
         return text ?? '';
     }
     return `${text.slice(0, max)}\n… [truncated ${text.length - max} chars]`;
+}
+
+/** Remove the most recent assistant text message (the echo a small model repeats). */
+function dropLastAssistantText(messages: any[]): void {
+    for (let index = messages.length - 1; index >= 0; index--) {
+        const message = messages[index];
+        if (message.role === 'system') return;
+        if (message.role !== 'assistant') continue;
+        if (Array.isArray(message.tool_calls) && message.tool_calls.length) return;
+        if (typeof message.content !== 'string' || !message.content.trim()) return;
+        messages.splice(index, 1);
+        return;
+    }
+}
+
+const REQUESTED_FILE_PATTERN =
+    /(?:^|[\s`'"([{,:])((?:[\w.-]+\/)*[\w.-]+\.(?:js|mjs|cjs|jsx|ts|tsx|json|jsonc|md|markdown|css|scss|sass|less|html|htm|py|rb|go|rs|java|kt|kts|cs|php|sh|ps1|bat|yml|yaml|toml|ini|cfg|xml|sql|txt|csv))(?=$|[\s`'"),;:!?}])/gi;
+
+/** Files the task explicitly names, so completion can be checked objectively. */
+function requestedPaths(task: string): string[] {
+    const found = new Set<string>();
+    for (const match of String(task ?? '').matchAll(REQUESTED_FILE_PATTERN)) {
+        const raw = match[1];
+        if (!raw || /^https?:/i.test(raw) || /^[a-z]:[\\/]/i.test(raw) || raw.includes('..')) continue;
+        found.add(raw.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+/g, '/'));
+    }
+    return [...found];
+}
+
+async function missingRequestedPaths(task: string, workspace: VsCodeWorkspace): Promise<string[]> {
+    const missing: string[] = [];
+    for (const candidate of requestedPaths(task)) {
+        let exists = false;
+        try {
+            // `read` is the public existence check here; `exists` is private to the
+            // workspace and not part of the interface the agent is given.
+            await workspace.read(candidate);
+            exists = true;
+        } catch {
+            exists = false;
+        }
+        if (!exists) missing.push(candidate);
+    }
+    return missing;
+}
+
+const MAX_WRITE_CHARS = 24_000;
+
+/** Refuse a single write that is too large to have been emitted intact. */
+function writeChunkLimit(content: unknown): string | null {
+    const text = String(content ?? '');
+    if (text.length <= MAX_WRITE_CHARS) return null;
+    return `That content is ${text.length.toLocaleString()} characters, but one call may contain at most ${MAX_WRITE_CHARS.toLocaleString()}. Split the file: write the beginning with write_file, then append each following section with append_file (roughly 150-250 lines per call). Do not shorten the requested file to fit one call.`;
+}
+
+function signatureDigest(value: string): string {
+    let hash = 2166136261;
+    for (let i = 0; i < value.length; i++) {
+        hash ^= value.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
 }

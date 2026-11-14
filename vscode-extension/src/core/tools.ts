@@ -17,6 +17,36 @@ export const RISK = {
     DESTRUCTIVE: 'destructive',
 } as const;
 
+export function canonicalizeToolCall<T extends { name: string }>(
+    call: T,
+): Omit<T, 'name'> & { name: string } {
+    const rawName = call.name
+        .trim()
+        .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+        .replace(/[\s-]+/g, '_')
+        .toLowerCase();
+    const aliases: Record<string, string> = {
+        create_file: 'write_file',
+        new_file: 'write_file',
+        make_file: 'write_file',
+        add_file: 'write_file',
+        create_directory: 'create_folder',
+        make_directory: 'create_folder',
+        new_directory: 'create_folder',
+        create_dir: 'create_folder',
+        mkdir: 'create_folder',
+        list_directory: 'list_files',
+        list_dir: 'list_files',
+        find_in_files: 'search_code',
+        search_files: 'search_code',
+        execute_command: 'run_command',
+        run_shell_command: 'run_command',
+        finish_task: 'finish',
+        create_snapshot: 'create_checkpoint',
+    };
+    return { ...call, name: aliases[rawName] ?? rawName };
+}
+
 export type Risk = typeof RISK[keyof typeof RISK];
 
 /**
@@ -34,17 +64,44 @@ export type Autonomy = typeof AUTONOMY[keyof typeof AUTONOMY];
 
 const SAFE_COMMAND_PATTERNS = [
     /^npm (test|run test|run lint|run build|run typecheck|run type-check)\b/,
-    /^npx (jest|vitest|tsc|eslint)\b/,
+    /^npx (jest|vitest|tsc|eslint|prettier)\b/,
     /^pnpm (test|build|lint)\b/,
     /^yarn (test|build|lint)\b/,
+    /^bun (test|build|lint)\b/,
     /^pytest\b/,
     /^python -m pytest\b/,
-    /^cargo (test|check|build)\b/,
-    /^go (test|build|vet)\b/,
+    /^python -m (unittest|unittest\.discover)\b/,
+    /^cargo (test|check|build|clippy)\b/,
+    /^go (test|build|vet|fmt)\b/,
+    /^gofmt\b/,
     /^dotnet (test|build)\b/,
-    /^mvn (test|verify)\b/,
-    /^gradle(w)? (test|build)\b/,
-    /^git (status|diff|log|branch)\b/,
+    /^mvn (test|verify|compile)\b/,
+    /^gradle(w)? (test|build|check)\b/,
+    /^make (test|check|build)\b/,
+    /^make test\b/,
+    /^make check\b/,
+    /^make build\b/,
+    /^eslint\b/,
+    /^prettier\b/,
+    /^black\b/,
+    /^flake8\b/,
+    /^pylint\b/,
+    /^mypy\b/,
+    /^ruff\b/,
+    /^rustfmt\b/,
+    /^gofmt\b/,
+    /^clang-format\b/,
+    /^clang-tidy\b/,
+    /^swiftlint\b/,
+    /^shellcheck\b/,
+    /^hadolint\b/,
+    /^tflint\b/,
+    /^terraform (fmt|validate)\b/,
+    /^docker (build|compose build)\b/,
+    /^git (status|diff|log|branch|remote|show)\b/,
+    /^git log\b/,
+    /^git diff\b/,
+    /^git status\b/,
 ];
 
 const BLOCKED_COMMAND_PATTERNS = [
@@ -53,8 +110,45 @@ const BLOCKED_COMMAND_PATTERNS = [
     /\bmkfs\b/,
     /:\(\)\s*\{.*\};\s*:/,
     />\s*\/dev\/sd/,
-    /\b(shutdown|reboot)\b/,
-    /\bdel\s+\/[sf]\b/i,
+    /\b(shutdown|reboot|poweroff|halt)\b/i,
+    /\bdel\s+\/[sfq]\b/i,
+    /\brmdir\s+\/[sq]\b/i,
+    /\b(chmod|chown)\s+777\b/,
+    /\bsudo\s+(rm|dd|mkfs|format)\b/,
+    /\bdd\s+if=/,
+    /\bwget\s+.*\|.*sh\b/,
+    /\bcurl\s+.*\|.*sh\b/,
+    /\b(?:eval|exec)\s+\$\(/,
+    /\becho\s+.*\|.*sh\b/,
+    />\s*\/(dev|proc|sys)\//,
+    /\bmount\s+.*\/dev\/sd/,
+    /\bumount\s+.*\/dev\/sd/,
+    /\b(sfdisk|fdisk|parted)\b/,
+    /\b(parted|partprobe)\b/,
+    /\b(cryptsetup|luks)\b/,
+    /\b(wipe|shred)\s+/,
+    /\b(scrub|srm)\s+/,
+    /\b(?:rm|del)\s+-rf\s+\//,
+    /\bmv\s+.*\//,
+    /\bcp\s+.*\//,
+    /\bchmod\s+.*\//,
+    /\bchown\s+.*\//,
+    /\buseradd|userdel|usermod\b/,
+    /\bgroupadd|groupdel|groupmod\b/,
+    /\bpasswd\b/,
+    /\bsu\b/,
+    /\bsudo\s+su\b/,
+    /\bcrontab\b/,
+    /\bat\b/,
+    /\bsystemctl\s+(stop|disable|mask)\b/,
+    /\bservice\s+.*stop\b/,
+    /\binit\s+[0-6]\b/,
+    /\btelinit\s+[0-6]\b/,
+    /\breboot\b/,
+    /\bshutdown\b/,
+    /\bkillall\b/,
+    /\bpkill\s+-9\b/,
+    /\bkill\s+-9\s+1\b/,
 ];
 
 export function isSafeCommand(command: string): boolean {
@@ -262,21 +356,25 @@ export function createStandardToolset(): ToolRegistry {
         risk: RISK.WRITE,
         autoSafe: false,
         async execute(args, ctx) {
-            const outcome = await ctx.workspace.write(args.path, args.content, Boolean(args.overwrite));
-            ctx.emit({ type: 'file_changed', ...outcome });
-            const verb = outcome.before ? 'Rewrote' : 'Created';
-            return {
-                ok: true,
-                diff: outcome.diff,
-                output: `${verb} ${outcome.path} (+${outcome.diff.added} / -${outcome.diff.removed} lines).`,
-            };
+            try {
+                const outcome = await ctx.workspace.write(args.path, args.content, Boolean(args.overwrite));
+                ctx.emit({ type: 'file_changed', ...outcome });
+                const verb = outcome.before ? 'Rewrote' : 'Created';
+                return {
+                    ok: true,
+                    diff: outcome.diff,
+                    output: `${verb} ${outcome.path} (+${outcome.diff.added} / -${outcome.diff.removed} lines).`,
+                };
+            } catch (err: any) {
+                return { ok: false, output: `ERROR: ${err.message}` };
+            }
         },
     });
 
     registry.register({
         name: 'edit_file',
         description:
-            'Replace an exact snippet in an existing file — the safe way to modify code. old_string must appear exactly once unless replace_all is true.',
+            'Replace an exact snippet in an existing file. If it occurs more than once, use the 1-based occurrence number from the error context, or provide more surrounding text. Use replace_all only when every match should change.',
         parameters: {
             type: 'object',
             properties: {
@@ -284,21 +382,27 @@ export function createStandardToolset(): ToolRegistry {
                 old_string: { type: 'string' },
                 new_string: { type: 'string' },
                 replace_all: { type: 'boolean' },
+                occurrence: { type: 'integer', description: '1-based matching occurrence to replace when old_string is repeated. Do not combine with replace_all.' },
             },
             required: ['path', 'old_string', 'new_string'],
         },
         risk: RISK.WRITE,
         autoSafe: false,
         async execute(args, ctx) {
-            const outcome = await ctx.workspace.edit(
-                args.path, args.old_string, args.new_string, Boolean(args.replace_all),
-            );
-            ctx.emit({ type: 'file_changed', ...outcome });
-            return {
-                ok: true,
-                diff: outcome.diff,
-                output: `Edited ${outcome.path} (+${outcome.diff.added} / -${outcome.diff.removed} lines).`,
-            };
+            try {
+                const outcome = await ctx.workspace.edit(
+                    args.path, args.old_string, args.new_string,
+                    Boolean(args.replace_all), args.occurrence,
+                );
+                ctx.emit({ type: 'file_changed', ...outcome });
+                return {
+                    ok: true,
+                    diff: outcome.diff,
+                    output: `Edited ${outcome.path} (+${outcome.diff.added} / -${outcome.diff.removed} lines).`,
+                };
+            } catch (err: any) {
+                return { ok: false, output: `ERROR: ${err.message}` };
+            }
         },
     });
 
@@ -318,12 +422,67 @@ export function createStandardToolset(): ToolRegistry {
         autoSafe: false,
         approvable: true,
         async execute(args, ctx) {
-            const outcome = await ctx.workspace.delete(args.path);
+            try {
+                const outcome = await ctx.workspace.delete(args.path);
+                ctx.emit({ type: 'file_changed', ...outcome });
+                return {
+                    ok: true,
+                    diff: outcome.diff,
+                    output: `Deleted ${outcome.path} (-${outcome.diff.removed} lines).`,
+                };
+            } catch (err: any) {
+                return { ok: false, output: `ERROR: ${err.message}` };
+            }
+        },
+    });
+
+    registry.register({
+        name: 'rename_file',
+        description:
+            'Rename or move a file within the workspace. Destructive — requires the user to approve it. The destination must not already exist.',
+        parameters: {
+            type: 'object',
+            properties: {
+                old_path: { type: 'string', description: 'Current path of the file to rename.' },
+                new_path: { type: 'string', description: 'New path for the file.' },
+            },
+            required: ['old_path', 'new_path'],
+        },
+        risk: RISK.DESTRUCTIVE,
+        autoSafe: false,
+        approvable: true,
+        async execute(args, ctx) {
+            const outcome = await ctx.workspace.rename(args.old_path, args.new_path);
             ctx.emit({ type: 'file_changed', ...outcome });
             return {
                 ok: true,
                 diff: outcome.diff,
-                output: `Deleted ${outcome.path} (-${outcome.diff.removed} lines).`,
+                output: `Renamed ${args.old_path} to ${args.new_path}.`,
+            };
+        },
+    });
+
+    registry.register({
+        name: 'copy_file',
+        description:
+            'Copy a file within the workspace. The destination must not already exist. Creates a duplicate at the new path.',
+        parameters: {
+            type: 'object',
+            properties: {
+                source_path: { type: 'string', description: 'Path of the file to copy.' },
+                dest_path: { type: 'string', description: 'Destination path for the copy.' },
+            },
+            required: ['source_path', 'dest_path'],
+        },
+        risk: RISK.WRITE,
+        autoSafe: false,
+        async execute(args, ctx) {
+            const outcome = await ctx.workspace.copy(args.source_path, args.dest_path);
+            ctx.emit({ type: 'file_changed', ...outcome });
+            return {
+                ok: true,
+                diff: outcome.diff,
+                output: `Copied ${args.source_path} to ${args.dest_path}.`,
             };
         },
     });

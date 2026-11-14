@@ -23,9 +23,22 @@ export function actionSignature(name, args) {
     case 'read_file':
       return `read_file:${a.path}`
     case 'edit_file':
-      return `edit_file:${a.path}::${String(a.old_string ?? '').slice(0, 80)}`
+      return `edit_file:${a.path}:${hash(JSON.stringify([
+        a.old_string,
+        a.new_string,
+        Boolean(a.replace_all),
+        a.occurrence ?? null,
+      ]))}`
     case 'write_file':
       return `write_file:${a.path}`
+    case 'create_folder':
+      return `create_folder:${a.path}`
+    case 'delete_file':
+      return `delete_file:${a.path}`
+    case 'rename_file':
+      return `rename_file:${a.old_path}->${a.new_path}`
+    case 'copy_file':
+      return `copy_file:${a.source_path}->${a.dest_path}`
     case 'run_command':
       return `run_command:${String(a.command ?? '').trim()}`
     case 'search_code':

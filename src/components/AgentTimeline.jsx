@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import {
-  Search, Play, Terminal, FileCode, Save, CheckCircle2, XCircle, Loader2, AlertTriangle,
+  Search, Play, Terminal, FileCode, FolderPlus, Save, CheckCircle2, XCircle, Loader2, AlertTriangle,
   RotateCcw, ChevronDown, ChevronRight, Clock, Check,
 } from 'lucide-react'
 import { Button } from './Button'
@@ -11,6 +11,7 @@ const STEP_ICON = {
   read_file: FileCode,
   search_code: Search,
   write_file: Save,
+  create_folder: FolderPlus,
   edit_file: Save,
   create_checkpoint: Clock,
   run_command: Terminal,
@@ -29,16 +30,28 @@ const PHASE_LABEL = {
 /** Live phase indicator shown while the agent is running. */
 export function AgentPhase({ phase, status }) {
   if (!phase && !status) return null
-  const active = phase && phase !== 'done'
+  const phases = ['inspect', 'plan', 'act', 'verify']
+  const activeIndex = phases.indexOf(phase)
+  const active = phase !== 'done'
   return (
-    <div className="flex items-center gap-2 rounded-lg border bg-card/60 px-3 py-2 text-xs">
-      {active ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+    <div className="agent-phase-panel" role="status" aria-live="polite">
+      <div className="agent-phase-heading">
+        {active ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" /> : <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />}
+        <span className="font-medium">{PHASE_LABEL[phase] ?? 'Working'}</span>
+        {status && <span className="truncate text-muted-foreground">{status}</span>}
+      </div>
+      {phase === 'recover' ? (
+        <div className="agent-recovery-note"><AlertTriangle size={12} /> Adjusting after a failed step</div>
       ) : (
-        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+        <div className="agent-phase-track" aria-label={`Current phase: ${PHASE_LABEL[phase] ?? 'working'}`}>
+          {phases.map((item, index) => (
+            <div className={`agent-phase-segment ${index < activeIndex || phase === 'done' ? 'is-complete' : ''} ${index === activeIndex ? 'is-current' : ''}`} key={item}>
+              <span>{index < activeIndex || phase === 'done' ? <Check size={10} /> : index + 1}</span>
+              <small>{PHASE_LABEL[item]}</small>
+            </div>
+          ))}
+        </div>
       )}
-      <span className="font-medium">{PHASE_LABEL[phase] ?? 'Working'}</span>
-      {status && <span className="truncate text-muted-foreground">— {status}</span>}
     </div>
   )
 }
@@ -48,13 +61,15 @@ export function AgentTimeline({ steps, onUndo }) {
   const [open, setOpen] = useState(true)
   if (!steps?.length) return null
 
-  const failures = steps.filter((s) => !s.ok).length
+  const failures = steps.filter((s) => s.ok === false).length
 
   return (
-    <div className="overflow-hidden rounded-lg border bg-card">
+    <div className="glass-card overflow-hidden rounded-2xl border">
       <button
+        type="button"
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent"
         onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
       >
         {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         <span className="font-medium">
@@ -66,12 +81,18 @@ export function AgentTimeline({ steps, onUndo }) {
             {failures} failed
           </span>
         )}
+        {steps.some((step) => step.ok == null) && (
+          <span className="ml-auto flex items-center gap-1 text-muted-foreground" role="status">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            In progress
+          </span>
+        )}
       </button>
 
       {open && (
-        <div className="space-y-2 border-t p-3">
+        <div className="space-y-2 border-t p-3" role="list" aria-label="Agent tool activity">
           {steps.map((step, i) => (
-            <StepRow key={i} step={step} onUndo={onUndo} />
+            <StepRow key={step.id ?? step.step ?? i} step={step} onUndo={onUndo} />
           ))}
         </div>
       )}
@@ -80,13 +101,20 @@ export function AgentTimeline({ steps, onUndo }) {
 }
 
 function StepRow({ step, onUndo }) {
+  const [outputOpen, setOutputOpen] = useState(
+    () => step.ok == null || step.ok === false || ['read_file', 'list_files', 'search_code'].includes(step.name),
+  )
   const Icon = STEP_ICON[step.name] ?? Play
   const label = step.args?.path ?? step.args?.command ?? step.args?.query ?? step.args?.label ?? ''
+  const pending = step.ok == null
+  const outputLabel = step.name === 'run_command' ? 'Command output' : 'Tool output'
 
   return (
-    <div className="flex items-start gap-2 text-xs">
+    <div className="agent-step flex items-start gap-2 text-xs" role="listitem" aria-label={`${step.name}: ${pending ? 'in progress' : step.ok ? 'completed' : 'failed'}`}>
       <span className="mt-0.5 w-4 shrink-0 text-right text-muted-foreground/60">{step.step}</span>
-      {step.ok ? (
+      {pending ? (
+        <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+      ) : step.ok ? (
         <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
       ) : (
         <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-600 dark:text-red-400" />
@@ -97,10 +125,17 @@ function StepRow({ step, onUndo }) {
           <span className="font-mono font-medium">{step.name}</span>
           {label && <span className="truncate font-mono text-muted-foreground">{label}</span>}
         </div>
-        {!step.ok && step.output && (
-          <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded border bg-red-50/60 px-2 py-1 text-[10px] text-red-900 dark:bg-red-950/30 dark:text-red-200">
-            {step.output}
-          </pre>
+        {step.output && (
+          <details
+            className="glass-inset mt-1 rounded-lg border"
+            open={outputOpen}
+            onToggle={(event) => setOutputOpen(event.currentTarget.open)}
+          >
+            <summary className="cursor-pointer px-2 py-1 text-[10px] text-muted-foreground">{outputLabel}</summary>
+            <pre className={`max-h-40 overflow-auto whitespace-pre-wrap border-t px-2 py-1 text-[10px] ${step.ok ? 'text-foreground' : 'bg-red-50/60 text-red-900 dark:bg-red-950/30 dark:text-red-200'}`}>
+              {step.output}
+            </pre>
+          </details>
         )}
         {step.diff && (
           <div className="mt-1">
@@ -122,7 +157,7 @@ export function TaskList({ steps }) {
   if (!steps?.length) return null
   const activeIndex = steps.findIndex((s) => !s.done)
   return (
-    <div className="rounded-lg border bg-card/60 px-3 py-2 text-xs">
+    <div className="glass-card rounded-2xl px-3 py-2 text-xs">
       <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Tasks</div>
       <ul className="space-y-1">
         {steps.map((step, i) => {
@@ -155,7 +190,7 @@ export function TaskList({ steps }) {
 export function CheckpointBar({ checkpoints, onRestore }) {
   if (!checkpoints?.length) return null
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card/60 px-3 py-2 text-xs">
+    <div className="glass-card flex flex-wrap items-center gap-2 rounded-2xl px-3 py-2 text-xs">
       <Clock className="h-3.5 w-3.5 text-muted-foreground" />
       <span className="font-medium">Checkpoints:</span>
       {checkpoints.map((cp) => (
@@ -181,14 +216,25 @@ export function CheckpointBar({ checkpoints, onRestore }) {
  * Revert is always offered, because the runtime takes its own checkpoint before
  * the run — it does not depend on the agent having remembered to make one.
  */
-export function RunControls({ fileCount, status, onAccept, onRevert, onRevertMessage }) {
+export function RunControls({ fileCount, status, summary, code, onAccept, onRevert, onRevertMessage }) {
   // Reverting a message is meaningful even when nothing changed, so the bar renders
   // whenever there is either a change to decide on or a message to undo.
   if (!fileCount && !onRevertMessage) return null
   const rough = status && status !== 'done'
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-card/60 px-3 py-2 text-xs">
-      {fileCount ? <span>This run changed {fileCount} file(s).</span> : <span>Finished.</span>}
+    <div className={`run-decision-panel ${rough ? 'is-incomplete' : 'is-complete'}`}>
+      <div className="run-decision-copy">
+        <strong>{fileCount ? `This run changed ${fileCount} item(s).` : status === 'aborted' ? 'Run stopped.' : status === 'failed' ? 'Run could not finish.' : 'Run finished.'}</strong>
+        {code && (
+          <code
+            className="rounded border px-1 py-0.5 font-mono text-[10px] text-muted-foreground"
+            title="Error code — look it up in docs/ERROR-CODES.md"
+          >
+            {code}
+          </code>
+        )}
+        {summary && <span>{summary}</span>}
+      </div>
       <div className="flex items-center gap-2">
         {fileCount ? (
           <>

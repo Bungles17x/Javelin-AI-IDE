@@ -1,12 +1,65 @@
 //! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
 
 import * as vscode from 'vscode';
-import { streamCompletion, getProvider, DEFAULT_PROVIDER } from './providers';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import * as path from 'node:path';
+import { streamCompletion, getProvider, DEFAULT_PROVIDER, isLocalOllamaEndpoint, probeProviderModel } from './providers';
 
-const SECRET_KEY = 'javelin.groqApiKey';
 const MAX_HISTORY_MESSAGES = 20;
 
-/** Resolve the configured provider from settings, defaulting to keyless local. */
+export function findOllamaExecutable(): string {
+    const candidates = [
+        process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Ollama', 'ollama.exe'),
+        process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Ollama', 'ollama.exe'),
+    ].filter((candidate): candidate is string => Boolean(candidate));
+    return candidates.find((candidate) => existsSync(candidate)) ?? 'ollama';
+}
+
+/** Start the local Ollama daemon on demand; never starts or redirects to a cloud provider. */
+export async function ensureLocalOllama(baseUrl: string): Promise<void> {
+    if (!isLocalOllamaEndpoint(baseUrl)) {
+        return;
+    }
+
+    const modelsUrl = `${baseUrl.replace(/\/$/, '')}/models`;
+    const isReady = async (): Promise<boolean> => {
+        try {
+            const response = await fetch(modelsUrl, { signal: AbortSignal.timeout(1000) });
+            return response.ok;
+        } catch {
+            return false;
+        }
+    };
+    if (await isReady()) {
+        return;
+    }
+
+    const child = spawn(findOllamaExecutable(), ['serve'], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+    });
+    let launchError: Error | undefined;
+    child.once('error', (error) => {
+        launchError = error;
+    });
+    child.unref();
+
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        if (await isReady()) {
+            return;
+        }
+        if (launchError) {
+            throw new Error(`Could not start Ollama: ${launchError.message}. Install Ollama and try again.`);
+        }
+    }
+
+    throw new Error('Ollama did not start on port 11434. Install Ollama or start it with `ollama serve`, then retry.');
+}
+
+/** Resolve the configured provider from settings, defaulting to the self-hosted Javelin model. */
 function currentProvider() {
     const config = vscode.workspace.getConfiguration('javelin');
     const id = config.get<string>('provider', DEFAULT_PROVIDER);
@@ -29,28 +82,6 @@ export interface ChatMessage {
     content: string;
 }
 
-/**
- * Resolve the API key, preferring the encrypted SecretStorage over the plain
- * settings value (which we keep for backwards compatibility).
- */
-export async function getApiKey(context: vscode.ExtensionContext): Promise<string> {
-    const fromSecrets = await context.secrets.get(SECRET_KEY);
-    if (fromSecrets) {
-        return fromSecrets;
-    }
-    const fromSettings = vscode.workspace.getConfiguration('javelin').get<string>('groqApiKey', '');
-    return fromSettings.trim();
-}
-
-export async function setApiKey(context: vscode.ExtensionContext, key: string): Promise<void> {
-    const trimmed = key.trim();
-    if (trimmed) {
-        await context.secrets.store(SECRET_KEY, trimmed);
-    } else {
-        await context.secrets.delete(SECRET_KEY);
-    }
-}
-
 function buildMessages(prompt: string, conversationHistory: ChatMessage[], extraContext?: string): ChatMessage[] {
     const messages: ChatMessage[] = [{ role: 'system', content: SYSTEM_PROMPT }];
     messages.push(...conversationHistory.slice(-MAX_HISTORY_MESSAGES));
@@ -61,24 +92,11 @@ function buildMessages(prompt: string, conversationHistory: ChatMessage[], extra
     return messages;
 }
 
-async function requireApiKey(context: vscode.ExtensionContext): Promise<string> {
-    const apiKey = await getApiKey(context);
-    if (!apiKey) {
-        const action = await vscode.window.showErrorMessage('Javelin AI: no Groq API key set.', 'Set API Key');
-        if (action === 'Set API Key') {
-            await vscode.commands.executeCommand('javelin.setApiKey');
-        }
-        throw new Error('Groq API key not configured. Get a free key at https://console.groq.com/keys');
-    }
-    return apiKey;
-}
-
 /**
- * Stream a completion from Groq. `onToken` is called for each text delta; the
- * full response text is returned at the end.
+ * Stream a completion from the self-hosted model. `onToken` receives each delta.
  */
 export async function generateCodeStreaming(
-    context: vscode.ExtensionContext,
+    _context: vscode.ExtensionContext,
     prompt: string,
     conversationHistory: ChatMessage[] = [],
     onToken: (delta: string) => void,
@@ -86,7 +104,17 @@ export async function generateCodeStreaming(
     extraContext?: string,
 ): Promise<string> {
     const { provider, baseUrl, model } = currentProvider();
-    const apiKey = provider.requiresKey ? await requireApiKey(context) : undefined;
+    if (provider.id !== 'javelin' && provider.id !== 'local') {
+        throw new Error('Only self-hosted Javelin and local Ollama providers are enabled. Select one in Javelin settings.');
+    }
+    if (!isLocalOllamaEndpoint(baseUrl)) {
+        throw new Error('Javelin only connects to the local Ollama runtime at 127.0.0.1:11434. Check the Javelin endpoint setting.');
+    }
+    await ensureLocalOllama(baseUrl);
+    const probe = await probeProviderModel({ providerId: provider.id, baseUrl, model });
+    if (!probe.ok) {
+        throw new Error(probe.detail);
+    }
 
     const abort = new AbortController();
     token?.onCancellationRequested(() => abort.abort());
@@ -95,7 +123,6 @@ export async function generateCodeStreaming(
         const result = await streamCompletion({
             providerId: provider.id,
             baseUrl,
-            apiKey,
             model,
             messages: buildMessages(prompt, conversationHistory, extraContext),
             temperature: 0.4,

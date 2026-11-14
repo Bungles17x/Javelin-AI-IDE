@@ -12,7 +12,6 @@
 //! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
 
 import * as vscode from 'vscode';
-import * as path from 'path';
 
 export interface FileChange {
     path: string;
@@ -269,7 +268,13 @@ export class VsCodeWorkspace {
     }
 
     /** Targeted snippet replacement — the safe default for existing files. */
-    async edit(relPath: string, oldString: string, newString: string, replaceAll = false): Promise<FileChange> {
+    async edit(
+        relPath: string,
+        oldString: string,
+        newString: string,
+        replaceAll = false,
+        occurrence?: number,
+    ): Promise<FileChange> {
         if (!(await this.exists(relPath))) {
             throw new Error(`File not found: ${relPath}. Use write_file to create it.`);
         }
@@ -277,20 +282,40 @@ export class VsCodeWorkspace {
         if (oldString === newString) {
             throw new Error('old_string and new_string are identical — nothing to change.');
         }
-        const occurrences = countOccurrences(before, oldString);
-        if (occurrences === 0) {
+        if (replaceAll && occurrence != null) {
+            throw new Error('Use either occurrence or replace_all, not both.');
+        }
+        const indexes = findOccurrences(before, oldString);
+        if (indexes.length === 0) {
             throw new Error(
                 `old_string not found in ${relPath}. It must match the file exactly, including indentation. Read the file and copy the snippet verbatim.`,
             );
         }
-        if (occurrences > 1 && !replaceAll) {
+        if (occurrence != null && (!Number.isInteger(occurrence) || occurrence < 1 || occurrence > indexes.length)) {
+            throw new Error(`occurrence must be between 1 and ${indexes.length} for this snippet in ${relPath}.`);
+        }
+        if (indexes.length > 1 && !replaceAll && occurrence == null) {
+            const lines = before.split('\n');
+            const locations = indexes.map((index, i) => {
+                const lineNumber = before.slice(0, index).split('\n').length;
+                const context = lines
+                    .slice(Math.max(0, lineNumber - 2), Math.min(lines.length, lineNumber + 1))
+                    .map((line) => line.trim())
+                    .join(' | ')
+                    .slice(0, 180);
+                return `#${i + 1} line ${lineNumber}: ${context}`;
+            });
             throw new Error(
-                `old_string appears ${occurrences} times in ${relPath}. Add surrounding context to make it unique, or set replace_all: true.`,
+                `old_string appears ${indexes.length} times in ${relPath}. Choose the intended match after inspecting its context, then retry with occurrence: N (1-based), or provide more surrounding text. Matches: ${locations.join('; ')}`,
             );
         }
-        const after = replaceAll
-            ? before.split(oldString).join(newString)
-            : before.replace(oldString, newString);
+        let after: string;
+        if (replaceAll) {
+            after = before.split(oldString).join(newString);
+        } else {
+            const index = occurrence == null ? indexes[0] : indexes[occurrence - 1];
+            after = before.slice(0, index) + newString + before.slice(index + oldString.length);
+        }
         await this.applyContent(relPath, after);
         return { path: relPath, before, after, diff: computeDiff(before, after), action: 'edit' };
     }
@@ -391,6 +416,17 @@ export class VsCodeWorkspace {
      * Asks VS Code to move it to the OS trash where supported (useTrash), so a
      * mistaken deletion is recoverable outside Javelin as well as via a checkpoint.
      */
+    /**
+     * Append text to a file, creating it if it does not exist yet.
+     *
+     * This is how a large file gets built when the model cannot emit it in one call.
+     */
+    async append(relPath: string, content: string): Promise<FileChange> {
+        const exists = await this.exists(relPath);
+        const before = exists ? await this.readRaw(relPath) : '';
+        return this.write(relPath, before + String(content ?? ''), true);
+    }
+
     async delete(relPath: string): Promise<FileChange> {
         if (!(await this.exists(relPath))) {
             throw new Error(`File not found: ${relPath}. Use list_files to see what exists.`);
@@ -398,6 +434,55 @@ export class VsCodeWorkspace {
         const before = await this.readRaw(relPath);
         await vscode.workspace.fs.delete(this.uri(relPath), { useTrash: true, recursive: false });
         return { path: relPath, before, after: '', diff: computeDiff(before, ''), action: 'delete' };
+    }
+
+    /**
+     * Create a directory (and any missing parents) inside the workspace.
+     */
+    async createFolder(relPath: string): Promise<{ path: string; created: boolean }> {
+        const target = String(relPath ?? '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+        if (!target) {
+            throw new Error('A folder path is required.');
+        }
+        const existed = await this.exists(target);
+        await vscode.workspace.fs.createDirectory(this.uri(target));
+        return { path: target, created: !existed };
+    }
+
+    /**
+     * Rename or move a file within the workspace.
+     */
+    async rename(oldPath: string, newPath: string): Promise<FileChange> {
+        if (!(await this.exists(oldPath))) {
+            throw new Error(`Source file not found: ${oldPath}. Use list_files to see what exists.`);
+        }
+        if (await this.exists(newPath)) {
+            throw new Error(`Destination already exists: ${newPath}. Delete it first or choose a different name.`);
+        }
+        if (oldPath === newPath) {
+            throw new Error('Source and destination are the same path.');
+        }
+        const before = await this.readRaw(oldPath);
+        await vscode.workspace.fs.rename(this.uri(oldPath), this.uri(newPath), { overwrite: false });
+        return { path: newPath, before, after: before, diff: computeDiff(before, before), action: 'edit' };
+    }
+
+    /**
+     * Copy a file within the workspace.
+     */
+    async copy(sourcePath: string, destPath: string): Promise<FileChange> {
+        if (!(await this.exists(sourcePath))) {
+            throw new Error(`Source file not found: ${sourcePath}. Use list_files to see what exists.`);
+        }
+        if (await this.exists(destPath)) {
+            throw new Error(`Destination already exists: ${destPath}. Delete it first or choose a different name.`);
+        }
+        if (sourcePath === destPath) {
+            throw new Error('Source and destination are the same path.');
+        }
+        const content = await this.readRaw(sourcePath);
+        await vscode.workspace.fs.writeFile(this.uri(destPath), Buffer.from(content, 'utf8'));
+        return { path: destPath, before: '', after: content, diff: computeDiff('', content), action: 'write' };
     }
 
     /** Preview an operation without applying it, for the approval dialog. */
@@ -545,17 +630,17 @@ export function computeDiff(before: string, after: string): DiffResult {
     };
 }
 
-function countOccurrences(haystack: string, needle: string): number {
+function findOccurrences(haystack: string, needle: string): number[] {
     if (!needle) {
-        return 0;
+        return [];
     }
-    let count = 0;
+    const indexes: number[] = [];
     let index = haystack.indexOf(needle);
     while (index !== -1) {
-        count++;
+        indexes.push(index);
         index = haystack.indexOf(needle, index + needle.length);
     }
-    return count;
+    return indexes;
 }
 
 function escapeRegExp(text: string): string {

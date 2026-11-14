@@ -17,6 +17,8 @@ import { join } from 'node:path'
 // The test runner bundles each test into a temp directory, so __dirname is not the
 // repo. The runner sets cwd to the project root, so resolve from there.
 const root = process.cwd()
+const extensionSource = readFileSync(join(root, 'vscode-extension', 'src', 'extension.ts'), 'utf8')
+const panelSource = readFileSync(join(root, 'vscode-extension', 'src', 'JavelinPanel.ts'), 'utf8')
 
 let failures = 0
 function check(name, cond, detail = '') {
@@ -77,6 +79,7 @@ console.log('\n3. The buttons that were reported broken are all present and wire
   // These are the controls whose failure produced the "no buttons work" report.
   const critical = [
     'sendBtn', 'clearBtn', 'settingsBtn',
+    'quickActionsBtn',
     'modeChat', 'modeAgent', 'modeJavelin',
     'agentModalBtn', 'agentModalClose', 'agentModalRun', 'agentModalStop', 'agentModalClear',
     'approvalApprove', 'approvalDeny',
@@ -85,6 +88,23 @@ console.log('\n3. The buttons that were reported broken are all present and wire
     check(`#${id} exists in the markup`, defined.has(id))
     check(`#${id} has a click handler wired`, html.includes(`getElementById('${id}')`))
   }
+}
+
+console.log('\n3a. The sidebar quick-action button reaches the extension command')
+{
+  check('the webview posts the quick-action command',
+    /postMessage\(\{\s*command:\s*'openQuickActions'/.test(html))
+  check('the extension dispatches quick actions to the picker',
+    /case 'openQuickActions':[\s\S]*?executeCommand\('javelin\.quickAction'\)/.test(panelSource))
+}
+
+console.log('\n3b. The quick-action picker has more than 20 additional workflows')
+{
+  const start = extensionSource.indexOf('const ADDITIONAL_QUICK_ACTIONS: AdditionalQuickAction[] = [')
+  const end = extensionSource.indexOf('\n];', start)
+  const actions = start >= 0 && end >= 0 ? extensionSource.slice(start, end) : ''
+  const count = [...actions.matchAll(/\{ label:/g)].length
+  check('at least 21 new actions are registered', count > 20, `found ${count}`)
 }
 
 console.log('\n4. The panel announces itself, so the host sends history')

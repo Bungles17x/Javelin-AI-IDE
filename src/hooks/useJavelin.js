@@ -13,10 +13,12 @@ import { VirtualWorkspace } from '../lib/virtualWorkspace.js'
  * It deliberately does NOT touch the existing chat path — chat and Javelin are
  * independent modes over the same provider.
  */
-export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles, memoryStore }) {
+export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles, workspaceDirectories = [], memoryStore }) {
   const provider = getProvider(providerId)
   const javelinRef = useRef(null)
+  const activeJavelinRef = useRef(null)
   const workspaceRef = useRef(null)
+  const runningRef = useRef(false)
   const approvalResolver = useRef(null)
 
   const [busy, setBusy] = useState(false)
@@ -27,6 +29,7 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
   const [steps, setSteps] = useState([])
   const [checkpoints, setCheckpoints] = useState([])
   const [thinking, setThinking] = useState('')
+  const [status, setStatus] = useState('')
   const [diagnostics, setDiagnostics] = useState(null)
   const [learnings, setLearnings] = useState({ strong: [], blocked: [], recentEpisodes: [] })
   const [approval, setApproval] = useState(null)
@@ -47,9 +50,8 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
 
   // Keep a live workspace mirror so Javelin always sees the latest files.
   useEffect(() => {
-    workspaceRef.current = new VirtualWorkspace(workspaceFiles)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    workspaceRef.current = new VirtualWorkspace(workspaceFiles, workspaceDirectories)
+  }, [workspaceFiles, workspaceDirectories])
 
   const refreshDiagnostics = useCallback(async () => {
     if (!javelinRef.current) {
@@ -61,11 +63,14 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
   }, [])
 
   const think = useCallback(
-    async (task, { onFileChanged, requestApprovalOverride, autonomy = 'ask' } = {}) => {
-      if (!javelinRef.current || !task?.trim() || busy) {
+    async (task, { onFileChanged, requestApprovalOverride, runCommand, autonomy = 'ask', priorMessages = [] } = {}) => {
+      if (!javelinRef.current || !task?.trim() || runningRef.current) {
         return null
       }
 
+      const instance = javelinRef.current
+      runningRef.current = true
+      activeJavelinRef.current = instance
       setError(null)
       setResult(null)
       setPhase('understand')
@@ -75,15 +80,17 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
       setPlanSteps([])
       setHypotheses([])
       setThinking('')
+      setStatus('Understanding the task and project…')
       setBusy(true)
 
       const liveSteps = []
 
       try {
-        const outcome = await javelinRef.current.think({
+        const outcome = await instance.think({
           task: task.trim(),
+          priorMessages,
           workspace: workspaceRef.current,
-          runCommand: undefined, // browser cannot execute shell commands
+          runCommand,
           // How much Javelin may do without prompting. 'ask' is the default;
           // 'auto-edit'/'full' let it run the whole job unattended.
           autonomy,
@@ -91,22 +98,26 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
             switch (evt.type) {
               case 'phase':
                 setPhase(evt.phase)
-                if (evt.label) {
-                  setThinking('')
-                }
+                setStatus(evt.label || 'Working through the current step…')
                 break
               case 'plan':
                 setPlan(evt.plan)
                 // The plan parsed into task steps, so the UI can tick them off.
                 setPlanSteps(evt.steps ?? [])
+                setStatus('Plan ready · preparing the first action…')
                 break
               case 'hypothesis':
                 setHypotheses((prev) => [...prev, evt.hypothesis])
+                setStatus('Diagnosing a failed step…')
                 break
               case 'thinking_delta':
-                setThinking((prev) => prev + evt.delta)
+                setStatus((current) => current || 'Preparing the next action…')
+                break
+              case 'thinking':
+                setStatus(evt.repeated ? 'The model repeated itself; recovering…' : 'Preparing the next action…')
                 break
               case 'tool_call':
+                setStatus(`${evt.name.replaceAll('_', ' ')}${evt.args?.path ? ` · ${evt.args.path}` : evt.args?.command ? ` · ${evt.args.command}` : ''}…`)
                 liveSteps.push({
                   id: evt.id,
                   step: liveSteps.length + 1,
@@ -126,6 +137,7 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
                   record.diff = evt.diff
                 }
                 setSteps([...liveSteps])
+                setStatus(`${evt.ok ? 'Completed' : 'Could not complete'} ${evt.name.replaceAll('_', ' ')}${record?.args?.path ? ` · ${record.args.path}` : ''}`)
                 // Tick the next pending task off — only on success, so a retry of a
                 // failed step never reads as progress.
                 if (evt.ok && evt.name !== 'finish') {
@@ -139,6 +151,15 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
                 }
                 if (evt.diff) {
                   onFileChanged?.(evt)
+                }
+                break
+              }
+              case 'command_output': {
+                const record = liveSteps.find((step) => step.id === evt.id)
+                if (record) {
+                  const prefix = evt.stream === 'stderr' ? '[stderr] ' : ''
+                  record.output = `${record.output}${prefix}${evt.text}`.slice(-12000)
+                  setSteps([...liveSteps])
                 }
                 break
               }
@@ -177,20 +198,26 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
         })
 
         setResult(outcome)
-        setLearnings(javelinRef.current.learnings())
+        setLearnings(instance.learnings())
         // Persist any files Javelin changed.
-        onFileChanged?.({ type: 'workspace_sync', files: workspaceRef.current.toJSON() })
+        onFileChanged?.({ type: 'workspace_sync', files: workspaceRef.current.toJSON(), directories: workspaceRef.current.directoryPaths() })
         return outcome
       } catch (err) {
         setError(err.message || String(err))
         return null
       } finally {
+        runningRef.current = false
+        activeJavelinRef.current = null
+        // The run is over: drop any approval nobody is waiting for.
+        approvalResolver.current = null
+        setApproval(null)
         setBusy(false)
         setPhase(null)
         setThinking('')
+        setStatus('')
       }
     },
-    [busy],
+    [],
   )
 
   const decideApproval = useCallback(({ approved, remember }) => {
@@ -200,7 +227,8 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
   }, [])
 
   const stop = useCallback(() => {
-    javelinRef.current?.stop()
+    const active = activeJavelinRef.current ?? javelinRef.current
+    active?.stop()
     if (approvalResolver.current) {
       approvalResolver.current({ approved: false })
       approvalResolver.current = null
@@ -230,6 +258,7 @@ export function useJavelin({ providerId, model, apiKey, baseUrl, workspaceFiles,
     steps,
     checkpoints,
     thinking,
+    status,
     diagnostics,
     learnings,
     approval,

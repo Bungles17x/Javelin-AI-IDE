@@ -1,0 +1,435 @@
+const { app, BrowserWindow, dialog, ipcMain } = require('electron')
+const fs = require('node:fs/promises')
+const { existsSync } = require('node:fs')
+const http = require('node:http')
+const path = require('node:path')
+const { spawn, spawnSync } = require('node:child_process')
+const { supportsTextFile } = require('./textFileTypes.cjs')
+
+const SKIP_DIRECTORIES = new Set([
+  '.git', '.hg', '.svn', 'node_modules', 'dist', 'build', 'release', '.venv', 'venv',
+  'coverage', '.next', '.turbo', 'training/runs', 'traces',
+])
+const MAX_FILE_BYTES = 5_000_000
+const MAX_WORKSPACE_BYTES = 50_000_000
+const MAX_WORKSPACE_FILES = 4000
+let workspaceRoot = null
+const runningCommands = new Map()
+let rendererServer = null
+
+const MIME_TYPES = {
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  // ONNX Runtime imports its WebAssembly glue as an .mjs module; served as
+  // octet-stream the browser refuses to execute it.
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ttf': 'font/ttf',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.wasm': 'application/wasm',
+}
+
+async function getLocalRuntimeStatus() {
+  const ollama = await fetch('http://127.0.0.1:11434/api/tags', { signal: AbortSignal.timeout(1500) })
+    .then(async (response) => {
+      if (!response.ok) return { ok: false, models: [] }
+      const body = await response.json()
+      return { ok: true, models: (body.models ?? []).map((model) => model.name) }
+    })
+    .catch(() => ({ ok: false, models: [] }))
+  return { ollama }
+}
+
+function findOllama() {
+  const candidates = [
+    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Ollama', 'ollama.exe'),
+    process.env.ProgramFiles && path.join(process.env.ProgramFiles, 'Ollama', 'ollama.exe'),
+  ].filter(Boolean)
+  const found = candidates.find((candidate) => existsSync(candidate))
+  if (found) return found
+  if (process.platform !== 'win32') return 'ollama'
+  const lookup = spawnSync('where.exe', ['ollama'], { encoding: 'utf8', windowsHide: true })
+  return lookup.status === 0 ? lookup.stdout.split(/\r?\n/)[0].trim() : null
+}
+
+async function startOllama() {
+  let status = await getLocalRuntimeStatus()
+  if (status.ollama.ok) return status.ollama
+  const executable = findOllama()
+  if (!executable) throw new Error('Ollama is not installed. Install Ollama, then try again.')
+  const process = spawn(executable, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true })
+  process.unref()
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    status = await getLocalRuntimeStatus()
+    if (status.ollama.ok) return status.ollama
+  }
+  throw new Error('Ollama did not start. Check whether another process is using port 11434.')
+}
+
+async function startRendererServer() {
+  const root = path.resolve(__dirname, '..', 'dist')
+  const contentSecurityPolicy = [
+    "default-src 'self'",
+    // ONNX Runtime compiles its WebAssembly glue by importing a module from a blob:
+    // URL, and 'wasm-unsafe-eval' is required to instantiate the binary itself.
+    "script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "worker-src 'self' blob:",
+    "connect-src 'self' http: https: ws: wss:",
+  ].join('; ')
+  const server = http.createServer(async (request, response) => {
+    try {
+      const pathname = decodeURIComponent(new URL(request.url, 'http://127.0.0.1').pathname)
+      const relativePath = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '')
+      const target = path.resolve(root, relativePath)
+      const relative = path.relative(root, target)
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+        response.writeHead(404).end('Not found')
+        return
+      }
+      const content = await fs.readFile(target)
+      response.writeHead(200, {
+        'Content-Type': MIME_TYPES[path.extname(target).toLowerCase()] ?? 'application/octet-stream',
+        'Content-Security-Policy': contentSecurityPolicy,
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'no-store',
+      })
+      response.end(content)
+    } catch (error) {
+      response.writeHead(error.code === 'ENOENT' ? 404 : 500).end('Not found')
+    }
+  })
+  const listen = (port) => new Promise((resolve, reject) => {
+    const handleError = (error) => {
+      server.removeListener('listening', handleListening)
+      reject(error)
+    }
+    const handleListening = () => {
+      server.removeListener('error', handleError)
+      resolve()
+    }
+    server.once('error', handleError)
+    server.once('listening', handleListening)
+    server.listen(port, '127.0.0.1')
+  })
+  try {
+    await listen(4318)
+  } catch (error) {
+    if (error.code !== 'EADDRINUSE') throw error
+    await listen(0)
+  }
+  rendererServer = server
+  return `http://127.0.0.1:${server.address().port}/`
+}
+
+function resolveWorkspacePath(relativePath) {
+  if (!workspaceRoot || typeof relativePath !== 'string' || !relativePath.trim()) {
+    throw new Error('Open a project folder first.')
+  }
+  const resolvedRoot = path.resolve(workspaceRoot)
+  const target = path.resolve(resolvedRoot, relativePath)
+  const relative = path.relative(resolvedRoot, target)
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error('The requested path is outside the open project.')
+  }
+  return target
+}
+
+async function assertInsideWorkspace(target, allowMissing = false) {
+  const realRoot = await fs.realpath(workspaceRoot)
+  let realTarget
+  try {
+    realTarget = await fs.realpath(target)
+  } catch (error) {
+    if (!allowMissing || error.code !== 'ENOENT') throw error
+    const parent = await fs.realpath(path.dirname(target))
+    realTarget = path.join(parent, path.basename(target))
+  }
+  const relative = path.relative(realRoot, realTarget)
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error('The requested path resolves outside the open project.')
+  }
+}
+
+async function ensureWorkspaceParent(target) {
+  const root = await fs.realpath(workspaceRoot)
+  const missing = []
+  let directory = path.dirname(target)
+  while (directory !== root) {
+    try {
+      await assertInsideWorkspace(directory)
+      if (!(await fs.stat(directory)).isDirectory()) throw new Error('Parent path is not a directory.')
+      break
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+      missing.push(directory)
+      const parent = path.dirname(directory)
+      if (parent === directory) throw new Error('Unable to create a project directory.')
+      directory = parent
+    }
+  }
+  for (const missingDirectory of missing.reverse()) {
+    await fs.mkdir(missingDirectory)
+    await assertInsideWorkspace(missingDirectory)
+  }
+}
+
+async function scanWorkspace(root) {
+  const files = []
+  const directories = []
+  const contents = {}
+  let totalBytes = 0
+  const walk = async (directory, depth = 0) => {
+    if (depth > 12 || files.length >= MAX_WORKSPACE_FILES) return
+    const entries = await fs.readdir(directory, { withFileTypes: true })
+    entries.sort((a, b) => a.name.localeCompare(b.name))
+    for (const entry of entries) {
+      if (files.length >= MAX_WORKSPACE_FILES) break
+      if (entry.isSymbolicLink()) continue
+      const absolute = path.join(directory, entry.name)
+      const relative = path.relative(root, absolute).split(path.sep).join('/')
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRECTORIES.has(entry.name) && !entry.name.startsWith('.cache')) {
+          directories.push(relative)
+          await walk(absolute, depth + 1)
+        }
+        continue
+      }
+      if (!entry.isFile()) continue
+      const stat = await fs.stat(absolute)
+      files.push({ path: relative, type: 'file', size: stat.size })
+      if (!supportsTextFile(entry.name) || stat.size > MAX_FILE_BYTES) continue
+      if (totalBytes + stat.size > MAX_WORKSPACE_BYTES) continue
+      const content = await fs.readFile(absolute, 'utf8')
+      if (content.includes('\u0000')) continue
+      contents[relative] = content
+      totalBytes += stat.size
+    }
+  }
+
+  await walk(root)
+  directories.sort((a, b) => a.localeCompare(b))
+  return { root, name: path.basename(root), files, directories, contents }
+}
+
+ipcMain.handle('workspace:open', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] })
+  if (result.canceled || !result.filePaths[0]) return null
+  workspaceRoot = await fs.realpath(result.filePaths[0])
+  return scanWorkspace(workspaceRoot)
+})
+
+ipcMain.handle('workspace:create', async (_event, name) => {
+  if (typeof name !== 'string') throw new Error('Workspace name must be text.')
+  const folderName = name.trim()
+  if (
+    !folderName ||
+    folderName === '.' ||
+    folderName === '..' ||
+    /[<>:"/\\|?*\u0000-\u001f]/.test(folderName) ||
+    /[. ]$/.test(folderName)
+  ) {
+    throw new Error('Enter a valid folder name without path separators or reserved characters.')
+  }
+
+  const result = await dialog.showOpenDialog({
+    title: 'Choose where to create the new workspace',
+    properties: ['openDirectory', 'createDirectory'],
+  })
+  if (result.canceled || !result.filePaths[0]) return null
+
+  const parent = await fs.realpath(result.filePaths[0])
+  const target = path.join(parent, folderName)
+  await fs.mkdir(target)
+  workspaceRoot = await fs.realpath(target)
+  return scanWorkspace(workspaceRoot)
+})
+
+ipcMain.handle('workspace:read', async (_event, relativePath) => {
+  const target = resolveWorkspacePath(relativePath)
+  await assertInsideWorkspace(target)
+  const stat = await fs.stat(target)
+  if (!stat.isFile() || stat.size > MAX_FILE_BYTES || !supportsTextFile(target)) {
+    throw new Error('This file is not a supported text file or exceeds the 2 MB editor limit.')
+  }
+  const content = await fs.readFile(target, 'utf8')
+  if (content.includes('\u0000')) throw new Error('This file contains binary data and cannot be opened in the text editor.')
+  return content
+})
+
+ipcMain.handle('workspace:write', async (_event, relativePath, content) => {
+  if (typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > MAX_FILE_BYTES) {
+    throw new Error('File content exceeds the 2 MB editor limit.')
+  }
+  const target = resolveWorkspacePath(relativePath)
+  await ensureWorkspaceParent(target)
+  await assertInsideWorkspace(target, true)
+  await fs.writeFile(target, content, 'utf8')
+  return { path: relativePath, size: Buffer.byteLength(content, 'utf8') }
+})
+
+ipcMain.handle('workspace:create-folder', async (_event, relativePath) => {
+  const target = resolveWorkspacePath(relativePath)
+  await ensureWorkspaceParent(target)
+  try {
+    await fs.mkdir(target)
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error
+    const stat = await fs.lstat(target)
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('A non-directory entry already exists at this path.')
+  }
+  await assertInsideWorkspace(target)
+  return { path: path.relative(workspaceRoot, target).split(path.sep).join('/'), created: true }
+})
+
+ipcMain.handle('workspace:delete-folder', async (_event, relativePath) => {
+  const target = resolveWorkspacePath(relativePath)
+  await assertInsideWorkspace(target)
+  const stat = await fs.lstat(target)
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Only regular project directories can be removed.')
+  await fs.rmdir(target)
+  return { path: relativePath }
+})
+
+ipcMain.handle('workspace:delete', async (_event, relativePath) => {
+  const target = resolveWorkspacePath(relativePath)
+  await assertInsideWorkspace(target)
+  const stat = await fs.lstat(target)
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Only regular project files can be deleted.')
+  await fs.unlink(target)
+  return { path: relativePath }
+})
+
+ipcMain.handle('workspace:rename', async (_event, oldPath, newPath) => {
+  const source = resolveWorkspacePath(oldPath)
+  const target = resolveWorkspacePath(newPath)
+  await assertInsideWorkspace(source)
+  const sourceStat = await fs.lstat(source)
+  if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error('Only regular project files can be renamed.')
+
+  const parent = path.dirname(target)
+  await assertInsideWorkspace(parent)
+  const parentStat = await fs.lstat(parent)
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) throw new Error('The destination folder must be a regular project directory.')
+  await assertInsideWorkspace(target, true)
+  try {
+    await fs.lstat(target)
+    throw new Error('A project entry already exists at the destination path.')
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+  await fs.rename(source, target)
+  return { oldPath, newPath }
+})
+
+ipcMain.handle('workspace:run-command', async (event, id, command) => {
+  if (!workspaceRoot) throw new Error('Open a project folder before running commands.')
+  if (typeof id !== 'string' || typeof command !== 'string' || !command.trim() || command.length > 4000) {
+    throw new Error('Command is empty or exceeds the 4,000 character limit.')
+  }
+  return new Promise((resolve) => {
+    const child = spawn(command, { cwd: workspaceRoot, shell: true, windowsHide: true })
+    const timeout = setTimeout(() => child.kill(), 120_000)
+    let stdout = ''
+    let stderr = ''
+    const append = (current, chunk) => `${current}${chunk.toString('utf8')}`.slice(-200_000)
+    runningCommands.set(id, child)
+    const forwardOutput = (stream, chunk) => {
+      const text = chunk.toString('utf8')
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('workspace:command-output', id, stream, text)
+      }
+      if (stream === 'stdout') stdout = append(stdout, chunk)
+      else stderr = append(stderr, chunk)
+    }
+    child.stdout.on('data', (chunk) => forwardOutput('stdout', chunk))
+    child.stderr.on('data', (chunk) => forwardOutput('stderr', chunk))
+    child.on('error', (error) => {
+      clearTimeout(timeout)
+      runningCommands.delete(id)
+      resolve({ exitCode: 1, stdout, stderr: `${stderr}${error.message}` })
+    })
+    child.on('close', (exitCode) => {
+      clearTimeout(timeout)
+      runningCommands.delete(id)
+      resolve({ exitCode: exitCode ?? 1, stdout, stderr })
+    })
+  })
+})
+
+ipcMain.on('workspace:cancel-command', (_event, id) => {
+  runningCommands.get(id)?.kill()
+})
+
+ipcMain.handle('runtime:status', getLocalRuntimeStatus)
+ipcMain.handle('runtime:start-ollama', startOllama)
+
+ipcMain.handle('network:reset', async () => {
+  const { session } = require('electron')
+  await session.defaultSession.closeAllConnections?.()
+  await session.defaultSession.clearHostResolverCache?.()
+  await session.defaultSession.clearCache()
+  return { ok: true }
+})
+
+function createWindow(rendererUrl) {
+  const window = new BrowserWindow({
+    width: 1540,
+    height: 980,
+    minWidth: 1120,
+    minHeight: 700,
+    title: 'Javelin AI IDE',
+    backgroundColor: '#111412',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  })
+
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.loadURL(process.env.JAVELIN_DEV_SERVER === '1' ? 'http://127.0.0.1:4317' : rendererUrl)
+}
+
+app.setName('Javelin AI IDE')
+
+// On some Windows setups Electron's media capture stalls forever instead of rejecting:
+// the request is neither granted nor denied. A hard timeout turns that silence into a
+// message the user can act on. Set JAVELIN_FAKE_MIC=1 to diagnose permission plumbing.
+if (process.env.JAVELIN_FAKE_MIC === '1') {
+  app.commandLine.appendSwitch('use-fake-ui-for-media-stream')
+}
+
+app.whenReady().then(async () => {
+  // The microphone is used by the app's own speech recognition. Electron denies
+  // media permission by default when a handler is installed, so grant it explicitly
+  // and leave every other permission at the previous (granting) behaviour.
+  const { session } = require('electron')
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'media') return callback(true)
+    callback(true)
+  })
+  session.defaultSession.setPermissionCheckHandler((webContents, permission) => permission === 'media' ? true : true)
+
+  const rendererUrl = process.env.JAVELIN_DEV_SERVER === '1' ? null : await startRendererServer()
+  createWindow(rendererUrl)
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('before-quit', () => rendererServer?.close())

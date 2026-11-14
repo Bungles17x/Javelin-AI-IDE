@@ -1,99 +1,264 @@
+import { TOOL_DEFS } from './agentTools.js'
+import { canonicalizeToolCall } from '../core/tools.js'
+import { codeError, ERROR_CODES } from '../engine/errors.js'
+
 /**
  * Provider layer.
  *
- * Javelin can talk to any OpenAI-compatible /chat/completions endpoint. The default
- * provider is a *local* model served by Ollama, which requires no API key and keeps
- * your code on your machine. Cloud providers are opt-in and pluggable.
- *
- * Why a provider abstraction instead of one hardcoded endpoint:
- *  - "No API key" is only physically possible when the model runs locally. A 70B
- *    cloud model cannot execute inside a browser tab. So the honest way to give you
- *    a keyless experience is to default to a local runtime and make cloud optional.
- *  - The agent loop is identical either way, so swapping providers changes nothing
- *    downstream.
+ * A local provider (Ollama on this machine) is keyless and cannot be pointed at a remote
+ * host. Hosted providers are opt-in: they need https and their own API key, and are never
+ * substituted for a local one implicitly. Transport failures carry a stable error code
+ * (see `src/engine/errors.js`).
  */
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]', '0.0.0.0'])
+
+/**
+ * Does this provider need the local Ollama runtime at all?
+ *
+ * Only a loopback endpoint does. A hosted provider must never start, probe or require
+ * Ollama — someone using OpenAI should not have a local runtime running (or installed).
+ */
+export function providerNeedsLocalRuntime(providerId, baseUrl) {
+  const provider = PROVIDERS[providerId]
+  // A provider that ships its own local server must not drag Ollama in with it.
+  if (provider?.localServer) return false
+  const endpoint = String(baseUrl || provider?.baseUrl || '')
+  try {
+    return LOOPBACK_HOSTS.has(new URL(endpoint).hostname.toLowerCase())
+  } catch {
+    return !provider?.hosted
+  }
+}
 
 export const PROVIDERS = {
   /**
-   * Javelin's own model: a fine-tuned adapter served locally by Ollama (or any
-   * OpenAI-compatible server). Keyless, like the plain local provider, but it points
-   * at the trained Javelin weights instead of a stock model.
-   *
-   * Nothing in the runtime changes for this — Javelin Core already treats any
-   * endpoint as a swappable engine. Selecting this provider is all that is needed to
-   * use a trained model. The model must actually exist; `npm run models` reports
-   * whether it does. A missing model simply fails to connect, like any other.
+   * Javelin Cloud — Javelin models served from our own proxy, free for users.
+   * No API key and no local runtime: the proxy holds the provider key server-side
+   * and counts one daily allowance per install id.
+   */
+  javelincloud: {
+    id: 'javelincloud',
+    label: 'Javelin Cloud (free, no key)',
+    baseUrl: 'https://site-96a7149f3a1b4e329da008e6a95c848e.freebuff.page/v1',
+    requiresKey: false,
+    keyless: true,
+    hosted: true,
+    freeTier: true,
+    installHeader: true,
+    models: [
+      { id: 'javelin', label: 'Javelin Cloud' },
+      { id: 'javelin-fast', label: 'Javelin Cloud (fast)' },
+    ],
+    defaultModel: 'javelin',
+    help:
+      'Free Javelin models hosted by Javelin Cloud. No API key and no Ollama: requests go to the hosted service, ' +
+      'which uses one shared free allowance (a daily request limit per machine).',
+  },
+  /**
+   * Javelin's self-hosted model served by local Ollama.
    */
   javelin: {
     id: 'javelin',
     label: 'Javelin (self-hosted)',
-    baseUrl: 'http://localhost:8080/v1',
+    baseUrl: 'http://127.0.0.1:11434/v1',
     requiresKey: false,
     isJavelinModel: true,
     models: [
-      { id: 'javelin', label: 'Javelin (your model)' },
-      { id: 'javelin-coder-80b', label: 'Javelin Coder 80B (flagship)' },
+      { id: 'javelin-coder:latest', label: 'Javelin Coder (local)' },
+      { id: 'qwen2.5-coder:7b', label: 'Local Qwen2.5 Coder 7B' },
+      { id: 'qwen2.5-coder:1.5b', label: 'Local Qwen2.5 Coder 1.5B (faster)' },
+      { id: 'llama3.2:1b', label: 'Local Llama 3.2 1B (faster)' },
     ],
-    defaultModel: 'javelin',
+    defaultModel: 'javelin-coder:latest',
     help:
-      'Serves your Javelin-trained weights. Create it once with ' +
-      '`ollama create javelin -f Modelfile`. Javelin Coder 80B must be trained and ' +
-      'merged first — run `npm run models` to see whether it actually exists.',
+      'Uses Javelin Coder through Ollama on this computer. Prompts and project files stay local; no hosted AI API is used. ' +
+      'Install the Javelin model through its supplied model distribution if it is not installed.',
   },
-
   /**
-   * Local runtime (Ollama). Keyless. Strong models available: qwen2.5-coder,
-   * deepseek-coder-v2, llama3.1, etc. Quality scales with your hardware.
+   * Javelin's own trained model, served by `training/knowledge/serve.py`.
+   *
+   * This is the one provider whose weights belong to this project: a LoRA adapter
+   * trained on the knowledge corpus, served from a loopback HTTP process with no
+   * Ollama and no key. `localServer` marks it so nothing tries to start or probe the
+   * Ollama runtime for it — a different local server must not imply a different one.
+   *
+   * It is deliberately not the default: a 135M model is fluent but not reliable on
+   * novel reasoning, and the agent loop needs a model that can drive tools.
    */
-  local: {
-    id: 'local',
-    label: 'Local (keyless)',
-    baseUrl: 'http://localhost:11434/v1',
+  javelinlocal: {
+    id: 'javelinlocal',
+    label: 'Javelin Local (your trained model)',
+    baseUrl: 'http://127.0.0.1:8787/v1',
     requiresKey: false,
+    keyless: true,
+    hosted: false,
+    localServer: true,
     models: [
-      { id: 'javelin-coder', label: 'Javelin Coder (local, built here)' },
-      { id: 'qwen2.5-coder:7b', label: 'Qwen2.5 Coder 7B' },
-      { id: 'qwen2.5-coder:14b', label: 'Qwen2.5 Coder 14B' },
-      { id: 'deepseek-coder-v2:16b', label: 'DeepSeek Coder V2 16B' },
-      { id: 'llama3.1:8b', label: 'Llama 3.1 8B' },
-      { id: 'codellama:13b', label: 'Code Llama 13B' },
+      { id: 'javelin-knowledge', label: 'Javelin Chatting Knowledge (0.5B, local)' },
+      { id: 'javelin-coder-1.5b', label: 'Javelin Coder 1.5B (local)' },
+      { id: 'javelin-coder-3b', label: 'Javelin Coder 3B (local, fast)' },
+      { id: 'javelin-coder-7b', label: 'Javelin Coder 7B (local, recommended)' },
     ],
-    defaultModel: 'javelin-coder',
+    // The coder is the better default for an editor; the chat model stays available.
+    defaultModel: 'javelin-coder-1.5b',
     help:
-      'Runs locally, no key, code never leaves your machine. Build your own Javelin ' +
-      'model once with `npm run model:local` (creates `javelin-coder`), then select it. ' +
-      'Or pull a stock model: `ollama pull qwen2.5-coder:7b`.',
+      'Your own trained models, running on this computer. Start them with "npm run serve:knowledge", then chat; the ' +
+      'llama.cpp path measured ~18 tokens/s against ~2.7 for the Python one. No API key, no Ollama and no cloud. ' +
+      'Javelin Chatting Knowledge (Qwen2.5-Coder 0.5B) is the conversation model; '
+      + 'Javelin Coder 7B is recommended when Vulkan GPU acceleration is available; 3B is the fast choice '
+      + 'without a GPU, and 1.5B is the lightest. The server detects a Vulkan device, offloads every layer '
+      + 'to it, and falls back to CPU automatically when no GPU is usable.',
   },
-
-  /** Groq cloud (fast, free tier, needs a key). */
+  /**
+   * Your own model, hosted on your own GPU endpoint.
+   *
+   * Unlike `javelincloud`, this does not proxy to a vendor model: the endpoint you
+   * point it at serves the merged weights from `npm run model:merge`. That makes 7B
+   * and 14B usable — sizes that cannot run in the IDE's own process.
+   *
+   * No default base URL on purpose. Guessing a host would produce a confusing
+   * failure; the error instead says the URL is missing and where to set it.
+   */
+  javelinhosted: {
+    id: 'javelinhosted',
+    label: 'Javelin Hosted (your own GPU model)',
+    baseUrl: '',
+    requiresKey: true,
+    hosted: true,
+    models: [
+      { id: 'javelin-7b', label: 'Javelin 7B (recommended)' },
+      { id: 'javelin-14b', label: 'Javelin 14B (needs 40GB+ VRAM)' },
+      { id: 'javelin-cloud', label: 'Javelin (whatever the server serves)' },
+    ],
+    defaultModel: 'javelin-7b',
+    help:
+      'Your own model on your own GPU endpoint, with no vendor AI in the request path. ' +
+      'Train and merge with the 7B/14B commands in cloud-model/README.md, deploy the container, ' +
+      'then paste its https URL and key here.',
+  },
+  /**
+   * Google Gemini — free tier, OpenAI-compatible endpoint, no card required.
+   * The default so a new install runs on a cloud model without Ollama.
+   */
+  gemini: {
+    id: 'gemini',
+    label: 'Google Gemini (free tier)',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    requiresKey: true,
+    hosted: true,
+    freeTier: true,
+    keyUrl: 'https://aistudio.google.com/app/apikey',
+    // Current model ids only: older flash ids answer 404 "no longer available to new
+    // users" for keys created today, which looked like a broken provider.
+    models: [
+      { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash (fast, free tier)' },
+      { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
+      { id: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (limited free tier)' },
+    ],
+    defaultModel: 'gemini-3.8-flash',
+    help:
+      'Cloud model with a free tier. Create a free API key in Google AI Studio (no card needed) and paste it here. ' +
+      'Prompts and file contents are sent to Google; nothing runs on this computer and Ollama is not used.',
+  },
+  openai: {
+    id: 'openai',
+    label: 'OpenAI (hosted)',
+    baseUrl: 'https://api.openai.com/v1',
+    requiresKey: true,
+    hosted: true,
+    models: [
+      { id: 'gpt-5-codex', label: 'GPT-5 Codex' },
+      { id: 'gpt-4.1', label: 'GPT-4.1' },
+      { id: 'gpt-4o-mini', label: 'GPT-4o mini (faster)' },
+    ],
+    defaultModel: 'gpt-5-codex',
+    help:
+      'Hosted OpenAI models. Prompts are sent to OpenAI with your API key, so project code you share in a prompt leaves this computer.',
+  },
   groq: {
     id: 'groq',
-    label: 'Groq (cloud, key required)',
+    label: 'Groq (hosted, low latency)',
     baseUrl: 'https://api.groq.com/openai/v1',
     requiresKey: true,
+    hosted: true,
+    freeTier: true,
+    keyUrl: 'https://console.groq.com/keys',
     models: [
+      { id: 'moonshotai/kimi-k2-instruct', label: 'Kimi K2 Instruct' },
       { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B' },
-      { id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B (fast)' },
-      { id: 'openai/gpt-oss-120b', label: 'GPT-OSS 120B' },
       { id: 'qwen/qwen3-32b', label: 'Qwen3 32B' },
     ],
-    defaultModel: 'llama-3.3-70b-versatile',
-    help: 'Get a free key at https://console.groq.com/keys',
+    defaultModel: 'moonshotai/kimi-k2-instruct',
+    help: 'Hosted Groq inference for very low latency. Requires a Groq API key; prompts leave this computer.',
   },
-
-  /** Any other OpenAI-compatible server (LM Studio, vLLM, OpenRouter, your own). */
+  together: {
+    id: 'together',
+    label: 'Together AI (hosted)',
+    baseUrl: 'https://api.together.xyz/v1',
+    requiresKey: true,
+    hosted: true,
+    models: [
+      { id: 'Qwen/Qwen3-Coder-480B-A35B-Instruct', label: 'Qwen3 Coder 480B' },
+      { id: 'deepseek-ai/DeepSeek-V3', label: 'DeepSeek V3' },
+    ],
+    defaultModel: 'Qwen/Qwen3-Coder-480B-A35B-Instruct',
+    help: 'Hosted Together AI models, including large coding fine-tunes. Requires an API key.',
+  },
+  openrouter: {
+    id: 'openrouter',
+    label: 'OpenRouter (hosted)',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    requiresKey: true,
+    hosted: true,
+    keyUrl: 'https://openrouter.ai/keys',
+    models: [
+      { id: 'anthropic/claude-sonnet-4.5', label: 'Claude Sonnet 4.5' },
+      { id: 'qwen/qwen3-coder', label: 'Qwen3 Coder' },
+    ],
+    defaultModel: 'anthropic/claude-sonnet-4.5',
+    help: 'Hosted models through OpenRouter. Requires an OpenRouter API key.',
+  },
   custom: {
     id: 'custom',
-    label: 'Custom OpenAI-compatible',
+    label: 'Custom OpenAI-compatible endpoint',
     baseUrl: '',
     requiresKey: false,
+    hosted: true,
     models: [],
     defaultModel: '',
-    help: 'Point this at any /v1 endpoint, including your own self-hosted model.',
+    help:
+      'Any OpenAI-compatible server (vLLM, LM Studio, llama.cpp, TGI). Use https for a remote host; localhost may use http. Add an API key if the server needs one.',
   },
 }
 
-export const DEFAULT_PROVIDER = 'local'
+// Library default: the local model, so an explicit provider choice is never assumed.
+export const DEFAULT_PROVIDER = 'javelin'
+// What the IDE starts a new install on.
+//
+// Javelin Cloud (the `javelincloud` provider) is the long-term answer, but until the
+// hosted service has its upstream key attached it can only answer "busy". A free
+// Gemini key is a real cloud API with proper limits, needs no local runtime, and is
+// what every install starts on, so the app works out of the box.
+export const DEFAULT_CLOUD_PROVIDER = 'gemini'
+
+/**
+ * This install's id, sent to Javelin Cloud so its free daily allowance is counted per
+ * machine rather than per user account.
+ */
+export function installId() {
+  const key = 'javelin.installId'
+  try {
+    let id = localStorage.getItem(key)
+    if (!id) {
+      id = globalThis.crypto?.randomUUID?.() ?? `j-${Date.now().toString(36)}`
+      localStorage.setItem(key, id)
+    }
+    return id
+  } catch {
+    return 'unknown-install'
+  }
+}
 
 export function getProvider(id) {
   return PROVIDERS[id] ?? PROVIDERS[DEFAULT_PROVIDER]
@@ -109,8 +274,10 @@ export function modelsFor(providerId, customModel) {
 /**
  * Stream a chat completion in OpenAI format.
  *
+ * Requests are restricted to the Ollama service on this computer.
+ *
  * @param {object} opts
- * @param {'local'|'groq'|'custom'} opts.providerId
+ * @param {'javelin'|'local'|'groq'|'custom'} opts.providerId
  * @param {string} [opts.baseUrl] override the provider's default endpoint
  * @param {string} [opts.apiKey] only needed when the provider requires one
  * @param {string} opts.model
@@ -120,7 +287,7 @@ export function modelsFor(providerId, customModel) {
  * @param {(call: {id: string, name: string, args: any}) => void} [opts.onToolCall]
  * @param {AbortSignal} [opts.signal]
  * @param {number} [opts.temperature]
- * @returns {Promise<{content: string, toolCalls: {id: string, name: string, args: any}[], finishReason: string}>}
+ * @returns {Promise<{content: string, toolCalls: {id: string, name: string, args: any}[], finishReason: string, usage: object|null}>}
  */
 export async function streamCompletion({
   providerId = DEFAULT_PROVIDER,
@@ -135,42 +302,91 @@ export async function streamCompletion({
   temperature = 0.2,
 }) {
   const provider = getProvider(providerId)
-  const url = `${(baseUrl || provider.baseUrl || '').replace(/\/$/, '')}/chat/completions`
-  if (!url.startsWith('http')) {
-    throw new Error(
-      `No endpoint configured for provider "${provider.id}". ${provider.help}`,
+
+  const endpoint = (baseUrl || provider.baseUrl || '').replace(/\/$/, '')
+  if (!endpoint) {
+    throw codeError(
+      new Error(`${provider.label ?? providerId} needs an endpoint URL. Open Settings and paste the https URL of your model server.`),
+      ERROR_CODES.MODEL_CONFIG,
     )
   }
-  if (provider.requiresKey && !apiKey) {
-    throw new Error(`Provider "${provider.label}" needs an API key. ${provider.help}`)
+  // A hosted provider is only reachable when the user selected one explicitly, and
+  // only for a non-loopback endpoint: a custom provider pointed at localhost is
+  // still a local model and must not demand a key. A local provider can never be
+  // pointed at a remote service by accident.
+  const hosted = Boolean(provider.hosted) && !isLocalOllamaEndpoint(endpoint)
+  if (hosted) {
+    if (!apiKey && !provider.keyless) {
+      throw codeError(
+        new Error(`${provider.label ?? providerId} requires an API key. Open Settings and add one.`),
+        ERROR_CODES.MODEL_AUTH,
+      )
+    }
+    let protocol = ''
+    try {
+      protocol = new URL(endpoint).protocol
+    } catch {
+      protocol = ''
+    }
+    if (protocol !== 'https:' && !isLocalOllamaEndpoint(endpoint)) {
+      throw codeError(new Error(`Hosted model endpoints must use https: ${endpoint}`), ERROR_CODES.MODEL_CONFIG)
+    }
+  } else if (!isLocalOllamaEndpoint(endpoint) && !isLoopbackEndpoint(endpoint)) {
+    throw codeError(
+      new Error('Javelin only connects to a server on this computer (localhost). Remote AI endpoints are disabled.'),
+      ERROR_CODES.MODEL_CONFIG,
+    )
   }
+  const url = `${endpoint}/chat/completions`
 
   const headers = { 'Content-Type': 'application/json' }
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`
+  // Credentials go only to an explicitly selected hosted provider.
+  if (hosted && apiKey && !provider.keyless) headers.Authorization = `Bearer ${apiKey}`
+  // Javelin Cloud counts its free allowance per install, not per account.
+  if (hosted && provider.installHeader) headers['x-javelin-install'] = installId()
 
   const body = {
     model,
     messages,
     temperature,
     stream: true,
+    ...(tools?.length ? { tools, tool_choice: 'auto' } : {}),
+    // Ask hosted providers to include the usage totals in the final chunk so
+    // signed-in token accounting can use exact numbers when they are offered.
+    ...(hosted ? { stream_options: { include_usage: true } } : {}),
   }
-  if (tools?.length) {
-    body.tools = tools
-    body.tool_choice = 'auto'
-  }
+
+  // A provider that never answers must not leave the UI spinning forever.
+  const timeoutMs = 90_000
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  const onCallerAbort = () => controller.abort()
+  signal?.addEventListener?.('abort', onCallerAbort, { once: true })
 
   let res
   try {
-    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal })
+    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal })
   } catch (err) {
-    if (err?.name === 'AbortError') throw err
-    // A network-level failure against a local runtime is almost always "not running".
-    if (provider.id === 'local') {
-      throw new Error(
-        `Could not reach the local model at ${url}. Is Ollama running? Try \`ollama serve\`. ${provider.help}`,
-      )
-    }
-    throw new Error(`Could not reach ${url}: ${err.message}`)
+    if (signal?.aborted) throw err
+    throw codeError(
+      new Error(
+        timedOut
+          ? `${provider.label ?? providerId} did not answer within ${Math.round(timeoutMs / 1000)}s. Free tiers are often busy — try again, or switch provider in Settings.`
+          : hosted
+            ? `Could not reach ${provider.label ?? providerId} at ${endpoint}. Check the endpoint and your network connection.`
+            : provider.localServer
+              ? `Could not reach your own model server at ${endpoint}. Start it with "npm run serve:knowledge" — it serves Javelin Chatting Knowledge and Javelin Coder 1.5B — then try again.`
+              : `Could not reach local Ollama at ${endpoint}. Start Ollama and confirm it is listening on port 11434. ${provider.help}`,
+      ),
+      ERROR_CODES.MODEL_UNREACHABLE,
+    )
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener?.('abort', onCallerAbort)
   }
 
   if (!res.ok) {
@@ -181,13 +397,34 @@ export async function streamCompletion({
     } catch {
       detail = await res.text().catch(() => '')
     }
-    if (res.status === 401) throw new Error('Invalid API key (401). Check it in Settings.')
-    if (res.status === 404) throw new Error(`Model "${model}" not found (404) at ${url}. ${provider.help}`)
-    if (res.status === 429) throw new Error('Rate limited (429). Wait a moment or use a smaller/local model.')
-    throw new Error(`Provider error ${res.status}: ${detail}`)
+    if (res.status === 404) {
+      throw codeError(new Error(`Model "${model}" not found (404) at ${url}. ${provider.help}`), ERROR_CODES.MODEL_CONFIG)
+    }
+    const statusCode = res.status === 401 || res.status === 403 ? ERROR_CODES.MODEL_AUTH : ERROR_CODES.MODEL_FAILED
+    throw codeError(new Error(`Provider error ${res.status}: ${detail}`), statusCode)
   }
 
   return readStream(res, { onToken, onToolCall, signal })
+}
+
+/** Any server on this machine — the Ollama runtime or Javelin's own knowledge server. */
+export function isLoopbackEndpoint(baseUrl) {
+  try {
+    return LOOPBACK_HOSTS.has(new URL(baseUrl).hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+export function isLocalOllamaEndpoint(baseUrl) {
+  try {
+    const endpoint = new URL(baseUrl)
+    return endpoint.protocol === 'http:' &&
+      ['localhost', '127.0.0.1', '[::1]'].includes(endpoint.hostname) &&
+      endpoint.port === '11434'
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -201,6 +438,7 @@ export async function readStream(res, { onToken, onToolCall, signal } = {}) {
   let buffer = ''
   let content = ''
   let finishReason = 'stop'
+  let usage = null
   const toolCalls = []
 
   const ensureCall = (index) => {
@@ -233,6 +471,7 @@ export async function readStream(res, { onToken, onToolCall, signal } = {}) {
           continue // keep-alive or partial fragment
         }
 
+        if (json.usage) usage = json.usage
         const choice = json.choices?.[0]
         if (!choice) continue
         if (choice.finish_reason) finishReason = choice.finish_reason
@@ -270,15 +509,13 @@ export async function readStream(res, { onToken, onToolCall, signal } = {}) {
     onToolCall?.(result)
   }
 
-  // Fallback for local models that *describe* a tool call in text instead of using
-  // the structured channel. qwen2.5-coder served by Ollama commonly emits a fenced
-  // JSON block (```json {...} ```) or a bare <tool_call>{...}</tool_call> rather than
-  // populating delta.tool_calls. Without this, the agent sees prose and never acts.
+  // Fallback for local models that describe tool calls in prose or fenced blocks
+  // instead of populating the structured channel.
   if (parsed.length === 0 && content) {
-    const salvaged = salvageToolCallFromText(content)
-    if (salvaged) {
-      parsed.push(salvaged)
-      onToolCall?.(salvaged)
+    const salvaged = salvageToolCallsFromText(content)
+    if (salvaged.length) {
+      parsed.push(...salvaged)
+      for (const call of salvaged) onToolCall?.(call)
     }
   }
 
@@ -286,58 +523,258 @@ export async function readStream(res, { onToken, onToolCall, signal } = {}) {
     content: parsed.length ? '' : content,
     toolCalls: parsed,
     finishReason,
+    usage,
   }
 }
 
 /**
- * Try to recover a single tool call that a model emitted as text.
- * Handles: a <tool_call>…</tool_call> block, a ```json fenced object, or a bare JSON
- * object that names a tool. Returns null if nothing tool-shaped is found — we never
- * invent a call that is not there.
+ * Recover recognized tool calls embedded in text. Local models sometimes label
+ * fences `jsonCopy` and repeat tool-call JSON inside explanatory prose; parse
+ * balanced JSON objects individually rather than trying to parse one greedy span.
  */
 export function salvageToolCallFromText(text) {
-  if (!text || typeof text !== 'string') return null
-  const candidates = []
+  return salvageToolCallsFromText(text)[0] ?? null
+}
 
-  // <tool_call> {...} </tool_call>
-  const tagged = text.match(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/i)
-  if (tagged) candidates.push(tagged[1])
-
-  // ```json ... ``` or ``` ... ```
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
-  if (fenced) candidates.push(fenced[1])
-
-  // A bare {...} object anywhere in the text.
-  const braced = text.match(/\{[\s\S]*\}/)
-  if (braced) candidates.push(braced[0])
-
-  for (const raw of candidates) {
+export function salvageToolCallsFromText(text) {
+  if (!text || typeof text !== 'string') return []
+  const toolDefinitions = new Map(TOOL_DEFS.map((tool) => [tool.function.name, tool.function]))
+  const calls = []
+  const seen = new Set()
+  for (const raw of extractBalancedJsonObjects(text)) {
     let obj
     try {
-      obj = JSON.parse(raw.trim())
+      obj = JSON.parse(raw)
     } catch {
-      continue
+      // Qwen occasionally wraps the whole call in an extra pair of braces.
+      const trimmed = raw.trim()
+      if (!(trimmed.startsWith('{{') && trimmed.endsWith('}}'))) continue
+      try {
+        obj = JSON.parse(trimmed.slice(1, -1))
+      } catch {
+        continue
+      }
     }
-    // Accept both {name, arguments} and the OpenAI {function:{name,arguments}} shape.
-    const fn = obj?.function ?? obj
-    const name = fn?.name ?? fn?.tool
-    if (typeof name !== 'string' || !name) continue
-    let args = fn?.arguments ?? fn?.parameters ?? {}
+
+    const fn = obj?.function ?? obj?.tool_call ?? obj
+    const rawName = fn?.name ?? fn?.tool
+    const name = typeof rawName === 'string' ? canonicalizeToolCall({ name: rawName }).name : rawName
+    const definition = toolDefinitions.get(name)
+    if (!definition) continue
+
+    let args = fn?.arguments ?? fn?.parameters ?? fn?.args ?? {}
     if (typeof args === 'string') {
       try {
         args = JSON.parse(args)
       } catch {
-        args = { __raw: args, __parseError: true }
+        continue
       }
     }
-    return { id: `salvaged_${name}_${Date.now()}`, name, args, salvaged: true }
+    if (!args || typeof args !== 'object' || Array.isArray(args)) continue
+    if ((definition.parameters.required ?? []).some((key) => !(key in args))) continue
+
+    const signature = JSON.stringify([name, args])
+    if (seen.has(signature)) continue
+    seen.add(signature)
+    calls.push({
+      position: text.indexOf(raw),
+      call: { id: `salvaged_${name}_${calls.length}`, name, args, salvaged: true },
+    })
   }
 
-  return null
+  for (const xmlCall of salvageXmlFunctionCalls(text, toolDefinitions)) {
+    const signature = JSON.stringify([xmlCall.name, xmlCall.args])
+    if (seen.has(signature)) continue
+    seen.add(signature)
+    calls.push(xmlCall)
+  }
+
+  for (const fileCall of salvageExplicitNewFile(text)) {
+    const signature = JSON.stringify([fileCall.name, fileCall.args])
+    if (seen.has(signature)) continue
+    seen.add(signature)
+    calls.push({ position: fileCall.position, call: fileCall })
+  }
+
+  return calls.sort((a, b) => a.position - b.position).map(({ call }) => call)
+}
+
+/**
+ * Recover Qwen's XML-ish call form:
+ *   <function name="write_file" arguments='{"path":"a.html","content":"..."}'/>
+ * The chat template can leak this as plain text when tool parsing is unavailable.
+ */
+function salvageXmlFunctionCalls(text, toolDefinitions) {
+  const calls = []
+  const pattern = /<function\s+name=["']([^"']+)["']\s+arguments=(?:"([\s\S]*?)"|'([\s\S]*?)')\s*\/?>/g
+  let match
+  while ((match = pattern.exec(text)) !== null) {
+    const name = canonicalizeToolCall({ name: match[1] }).name
+    const definition = toolDefinitions.get(name)
+    if (!definition) continue
+
+    let args
+    try {
+      args = JSON.parse((match[2] ?? match[3] ?? '').trim())
+    } catch {
+      continue
+    }
+    if (!args || typeof args !== 'object' || Array.isArray(args)) continue
+    if ((definition.parameters.required ?? []).some((key) => !(key in args))) continue
+
+    calls.push({
+      position: match.index,
+      call: { id: `salvaged_${name}_${calls.length}`, name, args, salvaged: true },
+    })
+  }
+  return calls
+}
+
+function salvageExplicitNewFile(text) {
+  const calls = []
+  const declaration = /\bcreate\s+a\s+new\s+file\s+[`'"]?([^`'"\s:]+)[`'"]?\s+inside\s+(?:the\s+)?[`'"]?([^`'".:]+)[`'"]?\s+folder\b/gi
+  let match
+  while ((match = declaration.exec(text)) !== null) {
+    const fileName = match[1]
+    const directory = match[2].replace(/[\\/]+$/, '')
+    const path = `${directory}/${fileName}`.replace(/\\/g, '/')
+    if (path.startsWith('/') || path.split('/').includes('..')) continue
+
+    const fence = /```[^\r\n`]*\r?\n([\s\S]*?)```/g
+    fence.lastIndex = declaration.lastIndex
+    let block
+    let selected
+    while ((block = fence.exec(text)) !== null) {
+      const code = block[1].trim()
+      if (!code) continue
+      try {
+        const parsed = JSON.parse(code)
+        if (parsed && (parsed.name || parsed.function?.name || parsed.tool)) continue
+      } catch {
+        // Most source blocks are not JSON.
+      }
+
+      const declaredPath = code.match(/^\s*(?:\/\/|#)\s*([^\r\n]+\.[\w.-]+)\s*$/m)?.[1]?.trim()
+      if (declaredPath) {
+        if (declaredPath.replace(/\\/g, '/') !== path) continue
+      }
+      selected = { code: `${code}\n`, position: block.index }
+      break
+    }
+    if (!selected) continue
+
+    calls.push({
+      id: `salvaged_write_file_${calls.length}`,
+      name: 'write_file',
+      args: { path, content: selected.code },
+      salvaged: true,
+      position: selected.position,
+    })
+  }
+
+  const mentionedPath = /\b(?:write|create|save|add|generate|implement|put)\b[^.\r\n]{0,180}?\b(?:in|to|at|as)\s+[`'"]?((?:[\w.-]+[\\/])*[\w.-]+\.[\w.-]+)[`'"]?/gi
+  while ((match = mentionedPath.exec(text)) !== null) {
+    const path = match[1].replace(/\\/g, '/')
+    if (path.startsWith('/') || path.split('/').includes('..')) continue
+
+    const fence = /```[^\r\n`]*\r?\n([\s\S]*?)```/g
+    let block
+    let selected
+    while ((block = fence.exec(text)) !== null) {
+      const code = block[1].trim()
+      if (!code) continue
+      try {
+        const parsed = JSON.parse(code)
+        if (parsed && (parsed.name || parsed.function?.name || parsed.tool)) continue
+      } catch {
+        // Most source blocks are not JSON.
+      }
+
+      const declaredPath = code.match(/^\s*(?:\/\/|#|<!--)\s*([^\r\n>]+\.[\w.-]+)\s*(?:-->)?\s*$/m)?.[1]?.trim()
+      if (declaredPath?.replace(/\\/g, '/') !== path) continue
+      selected = { code: `${code}\n`, position: block.index }
+      break
+    }
+    if (!selected) continue
+
+    calls.push({
+      id: `salvaged_write_file_${calls.length}`,
+      name: 'write_file',
+      args: { path, content: selected.code },
+      salvaged: true,
+      position: selected.position,
+    })
+  }
+
+  const codeFence = /```[^\r\n`]*\r?\n([\s\S]*?)```/g
+  let block
+  while ((block = codeFence.exec(text)) !== null) {
+    const code = block[1].trim()
+    if (!code) continue
+
+    const declaration = text.slice(0, block.index).split(/```/).pop() ?? ''
+    const explicitlyCreatesFile =
+      /\b(?:create|write|save|add|generate|implement|build)\b[^.!?\r\n]{0,180}\b(?:file|script|module|component|page|game|program)\b/i.test(declaration) ||
+      /\b(?:let['’]s|let us)\s+(?:call|name)\s+(?:it|this)\s+[`'"]?(?:[\w.-]+[\\/])*[\w.-]+\.[\w.-]+[`'"]?/i.test(declaration)
+    if (!explicitlyCreatesFile) continue
+
+    const headerPath = code.match(/^\s*(?:\/\/|#)\s*((?:[\w.-]+[\\/])*[\w.-]+\.[\w.-]+)\s*$/m)?.[1]
+      ?? code.match(/^\s*<!--\s*((?:[\w.-]+[\\/])*[\w.-]+\.[\w.-]+)\s*-->\s*$/m)?.[1]
+    if (!headerPath) continue
+
+    const path = headerPath.replace(/\\/g, '/').replace(/^\.\//, '')
+    if (!path || path.startsWith('/') || /^[a-z]:/i.test(path) || path.split('/').includes('..')) continue
+    try {
+      const parsed = JSON.parse(code)
+      if (parsed && (parsed.name || parsed.function?.name || parsed.tool)) continue
+    } catch {
+      // Source code is normally not JSON.
+    }
+
+    calls.push({
+      id: `salvaged_write_file_${calls.length}`,
+      name: 'write_file',
+      args: { path, content: `${code}\n` },
+      salvaged: true,
+      position: block.index,
+    })
+  }
+  return calls
+}
+
+function extractBalancedJsonObjects(text) {
+  const objects = []
+  let start = -1
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"' && depth > 0) {
+      inString = true
+    } else if (char === '{') {
+      if (depth === 0) start = index
+      depth += 1
+    } else if (char === '}' && depth > 0) {
+      depth -= 1
+      if (depth === 0) {
+        objects.push(text.slice(start, index + 1))
+        if (objects.length >= 100) break
+      }
+    }
+  }
+  return objects
 }
 
 /** True if a local runtime answers on its /v1 endpoint (used to show a friendly hint). */
-export async function probeLocalRuntime(baseUrl = PROVIDERS.local.baseUrl) {
+export async function probeLocalRuntime(baseUrl = PROVIDERS.javelin.baseUrl) {
   try {
     const res = await fetch(`${baseUrl.replace(/\/$/, '')}/models`, {
       signal: AbortSignal.timeout(1500),

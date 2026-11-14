@@ -1,7 +1,8 @@
 {
   "name": "javelin-ai-coding-assistant",
+  "productName": "Javelin AI IDE",
   "version": "1.0.0",
-  "description": "An AI coding agent that inspects, plans, edits and verifies your code — in the browser and in VS Code.",
+  "description": "Javelin AI - Independent AI ecosystem with local model, inference engine, and training pipeline.",
   "license": "MIT",
   "author": "Javelin AI",
   "homepage": "https://github.com/javelin-ai/javelin-ai-assistant#readme",
@@ -16,13 +17,18 @@
     "ai",
     "coding-agent",
     "llm",
-    "ollama",
+    "independent-ai",
+    "local-model",
     "vscode",
-    "code-assistant"
+    "code-assistant",
+    "offline-ai"
   ],
   "type": "module",
+  "main": "desktop/main.cjs",
   "scripts": {
     "dev": "vite",
+    "desktop:dev": "node scripts/dev-desktop.mjs",
+    "desktop:build": "npm run build && node scripts/prepare-monaco.mjs dist && electron-builder --win nsis",
     "build": "vite build",
     "preview": "vite preview",
     "test": "node tests/run.mjs",
@@ -30,13 +36,29 @@
     "train:prepare": "node training/finetune/prepare.mjs",
     "train:run": "node training/train.mjs",
     "train:status": "node training/status.mjs",
+    "train:knowledge": "node training/knowledge/build-knowledge-dataset.mjs",
+    "train:knowledge:run": ".venv/Scripts/python.exe training/knowledge/train_lora.py",
+    "serve:knowledge": "node scripts/serve-knowledge.mjs",
+    "serve:knowledge:python": ".venv/Scripts/python.exe training/knowledge/serve.py",
+    "chat:knowledge": ".venv/Scripts/python.exe training/knowledge/chat.py",
+    "model:merge": ".venv/Scripts/python.exe training/knowledge/merge_and_export.py",
+    "model:train:7b": ".venv/Scripts/python.exe training/knowledge/train_lora.py --device cuda --base Qwen/Qwen2.5-Coder-7B-Instruct --out training/knowledge/out-7b --epochs 3 --rank 32 --batch-size 1 --grad-accum 8",
+    "model:train:14b": ".venv/Scripts/python.exe training/knowledge/train_lora.py --device cuda --base Qwen/Qwen2.5-Coder-14B-Instruct --out training/knowledge/out-14b --epochs 3 --rank 32 --batch-size 1 --grad-accum 8",
+    "model:merge:7b": ".venv/Scripts/python.exe training/knowledge/merge_and_export.py --adapter training/knowledge/out-7b --out models/javelin-7b --dtype bfloat16",
+    "model:merge:14b": ".venv/Scripts/python.exe training/knowledge/merge_and_export.py --adapter training/knowledge/out-14b --out models/javelin-14b --dtype bfloat16",
     "models": "node training/models.mjs",
     "model:local": "node training/build-local-model.mjs",
     "capture": "node training/capture.mjs",
     "capture:auto": "node training/capture.mjs --auto",
-    "serve:model": "node training/serve-model.mjs"
+    "serve:model": "node training/serve-model.mjs",
+    "build:vsix": "node build-vsix.mjs",
+    "build:installer": "node scripts/build-installer.mjs",
+    "install:extension": "node scripts/install-extension.mjs",
+    "local:train": "node local-model/train.js",
+    "local:model:info": "node -e \"import('./local-model/adapter.js').then(m => console.log(m.getModelInfo()))\""
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.3.2",
     "clsx": "^2.1.0",
     "lucide-react": "^0.344.0",
     "react": "^18.3.1",
@@ -46,12 +68,40 @@
     "tailwind-merge": "^2.2.1"
   },
   "devDependencies": {
+    "@monaco-editor/react": "^4.7.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.18",
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.12",
     "postcss": "^8.4.35",
     "tailwindcss": "^3.4.1",
     "vite": "^5.1.6"
+  },
+  "build": {
+    "appId": "ai.javelin.ide",
+    "productName": "Javelin AI IDE",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop/**/*",
+      "local-model/**/*",
+      "models/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "vscode-extension/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

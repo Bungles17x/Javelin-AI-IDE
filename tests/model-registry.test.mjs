@@ -127,14 +127,151 @@ console.log('\n7. Local models that describe a tool call in text still work')
   const tagged = salvageToolCallFromText('<tool_call>\n{"name": "read_file", "arguments": {"path": "a.js"}}\n</tool_call>')
   check('a <tool_call> block is recovered', tagged?.name === 'read_file', JSON.stringify(tagged))
 
-  const openaiShape = salvageToolCallFromText('```json\n{"function": {"name": "edit_file", "arguments": {"path": "a.js"}}}\n```')
+  const openaiShape = salvageToolCallFromText(
+    '```json\n{"function": {"name": "edit_file", "arguments": {"path": "a.js", "old_string": "old", "new_string": "new"}}}\n```',
+  )
   check('the OpenAI {function:{name}} shape is recovered', openaiShape?.name === 'edit_file', JSON.stringify(openaiShape))
+
+  const doubled = salvageToolCallFromText('{{"name": "read_file", "arguments": {"path": "a.js"}}}')
+  check('a doubled-brace JSON call is recovered', doubled?.name === 'read_file', JSON.stringify(doubled))
+
+  const xml = salvageToolCallFromText(
+    '<function name="write_file" arguments=\'{"path":"hello.html","content":"<h1>hi</h1>"}\'/>',
+  )
+  check('a Qwen XML function call is recovered', xml?.name === 'write_file', JSON.stringify(xml))
+  check('its XML arguments are parsed', xml?.args?.path === 'hello.html', JSON.stringify(xml?.args))
 
   const prose = salvageToolCallFromText('I think you should look at the file yourself.')
   check('plain prose yields no invented tool call', prose === null, JSON.stringify(prose))
 
   const empty = salvageToolCallFromText('')
   check('empty text yields nothing', empty === null)
+
+  const noisyResponse = [
+    'Create a new file `Game.js` inside the `src/chess` folder.',
+    'javascriptCopy',
+    '```',
+    'class Game {',
+    '  constructor() { this.board = []; }',
+    '}',
+    '```',
+    'Run the project tests:',
+    'jsonCopy',
+    '```',
+    '{"name":"run_command","arguments":{"command":"npm test"}}',
+    '```',
+    'Repeat the command:',
+    'jsonCopy',
+    '```',
+    '{"name":"run_command","arguments":{"command":"npm test"}}',
+    '```',
+  ].join('\n')
+  const recovered = salvageToolCallFromText(noisyResponse)
+  check('the explicit file action is recovered before the command',
+    recovered?.name === 'write_file' && recovered.args.path === 'src/chess/Game.js',
+    JSON.stringify(recovered))
+
+  const { salvageToolCallsFromText } = await import('../src/lib/providers.js')
+  const deduplicated = salvageToolCallsFromText(noisyResponse)
+  check('an explicitly described new file is recovered from its code block',
+    deduplicated[0]?.name === 'write_file' &&
+      deduplicated[0]?.args.path === 'src/chess/Game.js' &&
+      deduplicated[0]?.args.content.includes('class Game'),
+    JSON.stringify(deduplicated[0]))
+  check('repeated copies of the file and command are only executed once', deduplicated.length === 2, String(deduplicated.length))
+  const unknown = salvageToolCallFromText('{"name":"delete_project","arguments":{"path":"."}}')
+  check('unregistered tool names are not executed', unknown === null)
+  const legacyFileCall = salvageToolCallFromText(
+    '{"name":"create_file","arguments":{"path":"src/new.js","content":"export {}"}}',
+  )
+  check('legacy create_file JSON is normalized to the registered write_file tool',
+    legacyFileCall?.name === 'write_file' &&
+      legacyFileCall.args.path === 'src/new.js' &&
+      legacyFileCall.args.content === 'export {}',
+    JSON.stringify(legacyFileCall))
+  const camelCaseFileCall = salvageToolCallFromText(
+    '{"name":"createFile","arguments":{"path":"src/camel.js","content":"export {}"}}',
+  )
+  check('camelCase file tool JSON is recovered as a supported file write',
+    camelCaseFileCall?.name === 'write_file' &&
+      camelCaseFileCall.args.path === 'src/camel.js',
+    JSON.stringify(camelCaseFileCall))
+
+  const responseBody = `data: ${JSON.stringify({
+    choices: [{ delta: { content: noisyResponse }, finish_reason: 'stop' }],
+  })}\n\ndata: [DONE]\n\n`
+  const { readStream } = await import('../src/lib/providers.js')
+  const streamed = await readStream(new Response(responseBody, {
+    headers: { 'Content-Type': 'text/event-stream' },
+  }))
+  check('the SSE parser returns the recovered command as a real tool call',
+    streamed.toolCalls[1]?.name === 'run_command' && streamed.toolCalls[1]?.args.command === 'npm test',
+    JSON.stringify(streamed.toolCalls))
+  check('the serialized tool call is not left as assistant prose', streamed.content === '')
+
+  const narratedFile = [
+    'Plan:',
+    '1. Write the initial code for the game logic in `flappy_bird/game.js`.',
+    '```javascript',
+    '// flappy_bird/game.js',
+    'export function startGame() {}',
+    '```',
+  ].join('\n')
+  const narratedCalls = salvageToolCallsFromText(narratedFile)
+  check('a direct write instruction with a matching path comment becomes a file action',
+    narratedCalls.length === 1 &&
+      narratedCalls[0].name === 'write_file' &&
+      narratedCalls[0].args.path === 'flappy_bird/game.js' &&
+      narratedCalls[0].args.content.includes('startGame'),
+    JSON.stringify(narratedCalls))
+  const ambiguousFence = salvageToolCallsFromText([
+    'Here is an example of a game loop:',
+    '```javascript',
+    '// flappy_bird/game.js',
+    'export function startGame() {}',
+    '```',
+  ].join('\n'))
+  check('a code sample without an explicit write instruction does not create a file',
+    ambiguousFence.length === 0, JSON.stringify(ambiguousFence))
+
+  const narratedScript = [
+    'First, we need to create a Python script for the game. Let us call it `guess_the_number.py`.',
+    'pythonCopy',
+    '```',
+    '# guess_the_number.py',
+    'def play_game():',
+    '    return "ready"',
+    '```',
+    'Now, create an HTML file to load this script.',
+    'htmlCopy',
+    '```',
+    '<!-- flappy_bird/index.html -->',
+    '<!doctype html>',
+    '<script src="game.js"></script>',
+    '```',
+    'If another script needs to import it, use this example.',
+    '```python',
+    '# main.py',
+    'from guess_the_number import play_game',
+    '```',
+  ].join('\n')
+  const recoveredScripts = salvageToolCallsFromText(narratedScript)
+  check('explicit file-creation narration recovers multiple source files',
+    recoveredScripts.length === 2 &&
+      recoveredScripts[0].args.path === 'guess_the_number.py' &&
+      recoveredScripts[1].args.path === 'flappy_bird/index.html',
+    JSON.stringify(recoveredScripts))
+  check('an import example is not mistaken for another file creation',
+    !recoveredScripts.some((call) => call.args.path === 'main.py'))
+  const unsafeHeader = salvageToolCallsFromText([
+    'Create a Python script for the game.',
+    '```python',
+    '# ../outside.py',
+    'print("unsafe")',
+    '```',
+  ].join('\n'))
+  check('narrated paths cannot escape the workspace',
+    unsafeHeader.length === 0, JSON.stringify(unsafeHeader))
 }
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}\n`)

@@ -12,7 +12,12 @@ export function actionSignature(name: string, args: any): string {
     const a = args ?? {};
     switch (name) {
         case 'read_file': return `read_file:${a.path}`;
-        case 'edit_file': return `edit_file:${a.path}::${String(a.old_string ?? '').slice(0, 80)}`;
+        case 'edit_file': return `edit_file:${a.path}:${hash(JSON.stringify([
+            a.old_string,
+            a.new_string,
+            Boolean(a.replace_all),
+            a.occurrence ?? null,
+        ]))}`;
         case 'write_file': return `write_file:${a.path}`;
         case 'run_command': return `run_command:${String(a.command ?? '').trim()}`;
         case 'search_code': return `search_code:${a.query}`;

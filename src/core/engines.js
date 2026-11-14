@@ -65,7 +65,12 @@ export function providerEngine(provider, { id, label, capabilities = [], model }
     capabilities,
     async probe() {
       try {
-        const res = await fetch(`${provider.baseUrl.replace(/\/$/, '')}/models`, {
+        // Anthropic uses a different endpoint for checking availability
+        const endpoint = provider.id === 'anthropic' 
+          ? `${provider.baseUrl.replace(/\/$/, '')}/messages`
+          : `${provider.baseUrl.replace(/\/$/, '')}/models`
+        
+        const res = await fetch(endpoint, {
           signal: AbortSignal.timeout(1500),
         })
         return res.ok ? { ok: true } : { ok: false, detail: `HTTP ${res.status}` }

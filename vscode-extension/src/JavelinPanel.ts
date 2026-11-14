@@ -1,11 +1,11 @@
 //! IMPORTANT: DO NOT mess with this file unless instructed to, as this file is critical to the system, training process and any changes may break the training pipeline.
 
 import * as vscode from 'vscode';
-import { generateCodeStreaming, getErrorMessage, getApiKey, ChatMessage } from './aiService';
+import { generateCodeStreaming, getErrorMessage, ensureLocalOllama, ChatMessage } from './aiService';
 import { getNonce } from './getNonce';
 import { runAgent, AgentCallbacks, ApprovalRequest, isSafeCommand, runShellCommand } from './agent';
 import { VsCodeWorkspace } from './workspace';
-import { getProvider, DEFAULT_PROVIDER } from './providers';
+import { getProvider, DEFAULT_PROVIDER, probeProviderModel } from './providers';
 import { EngineRegistry, providerEngine, CAPABILITY } from './core/engines';
 import { JavelinMemory, MemorySnapshot } from './core/memory';
 import { runJavelin } from './core/runtime';
@@ -41,7 +41,7 @@ interface MessageMark {
 /**
  * Check whether the Javelin model is actually being served.
  *
- * Selecting the trained model when the weights were never created is an easy
+ * Selecting a model that is not installed is an easy
  * mistake, and the raw failure is an opaque 404 mid-generation. This turns it into
  * an actionable message.
  */
@@ -87,6 +87,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
     private _messageMarks: MessageMark[] = [];
     private _pendingContext = '';
     private _activeRequest?: vscode.CancellationTokenSource;
+    private _taskRunning = false;
 
     // Javelin Core: its own reasoning runtime, memory and engine registry.
     private _javelinAbort?: AbortController;
@@ -217,6 +218,9 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     case 'openSettings':
                         await vscode.commands.executeCommand('workbench.action.openSettings', 'javelin');
                         break;
+                    case 'openQuickActions':
+                        await vscode.commands.executeCommand('javelin.quickAction');
+                        break;
                     case 'approvalDecision':
                         this.resolveApproval(Boolean(message.approved), Boolean(message.remember));
                         break;
@@ -315,6 +319,11 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         if (!this._view) {
             return;
         }
+        const abort = this._javelinAbort ?? new AbortController();
+        this._javelinAbort = abort;
+        if (abort.signal.aborted) {
+            return;
+        }
 
         const workspace = this.getWorkspace();
         if (!workspace) {
@@ -328,11 +337,10 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         const config = vscode.workspace.getConfiguration('javelin');
         const providerId = config.get<string>('provider', DEFAULT_PROVIDER);
         const provider = getProvider(providerId);
-        const apiKey = provider.requiresKey ? await getApiKey(this._context) : undefined;
-        if (provider.requiresKey && !apiKey) {
+        if (provider.id !== 'javelin' && provider.id !== 'local') {
             this._view.webview.postMessage({
                 command: 'error',
-                error: `Provider "${provider.label}" needs an API key. Run "Javelin AI: Set API Key", or switch to the local provider.`,
+                error: 'Only self-hosted Javelin and local Ollama providers are enabled.',
             });
             return;
         }
@@ -342,42 +350,51 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         const baseUrl = config.get<string>('baseUrl', '') || provider.baseUrl;
         const model = config.get<string>('model', provider.defaultModel) || provider.defaultModel;
 
+        await ensureLocalOllama(baseUrl);
+        if (abort.signal.aborted) {
+            return;
+        }
+        const check = await probeProviderModel({ providerId: provider.id, baseUrl, model });
+        if (abort.signal.aborted) {
+            return;
+        }
+        if (!check.ok) {
+            this._view.webview.postMessage({ command: 'error', error: check.detail });
+            return;
+        }
+
         // A selected-but-unserved Javelin model would otherwise fail with a bare
         // fetch error. Say what is actually wrong and how to fix it.
         if (provider.isJavelinModel) {
             const check = await probeJavelinModel(baseUrl, model);
+            if (abort.signal.aborted) {
+                return;
+            }
             if (!check.ok) {
                 this._view.webview.postMessage({
                     command: 'error',
                     error:
                         `Javelin model is not available: ${check.detail}. ` +
-                        `Create it with \`ollama create ${model} -f Modelfile\` ` +
-                        `(see docs/TRAINING.md), or switch provider with ` +
-                        `"Javelin AI: Select Model Provider".`,
+                        `Install it with \`ollama pull ${model}\`, or choose an installed local model ` +
+                        `with "Javelin AI: Select Model Provider".`,
                 });
                 return;
             }
         }
         engines.register(
             providerEngine(
-                { id: provider.id, label: provider.label, baseUrl, apiKey, defaultModel: provider.defaultModel },
+                { id: provider.id, label: provider.label, baseUrl, defaultModel: provider.defaultModel },
                 {
                     id: 'javelin-primary',
                     label: `${provider.label} engine`,
                     model,
-                    capabilities: provider.requiresKey
-                        ? [CAPABILITY.TOOLS, CAPABILITY.STRONG_REASONING]
-                        : [CAPABILITY.TOOLS, CAPABILITY.OFFLINE],
+                    capabilities: [CAPABILITY.TOOLS, CAPABILITY.OFFLINE],
                 },
             ),
         );
         engines.assign('primary', 'javelin-primary');
 
         const memory = this.getMemory();
-        const abort = new AbortController();
-        this._javelinAbort = abort;
-
-        this._view.webview.postMessage({ command: 'agentStart', mode: 'javelin' });
 
         const tools = createStandardToolset();
         const autoApproveSafe = config.get<boolean>('agentAutoApproveSafeCommands', true);
@@ -387,12 +404,11 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             onPhase: (phase, label) => this._view?.webview.postMessage({ command: 'javelinPhase', phase, label }),
             onPlan: (plan, steps) => this._view?.webview.postMessage({ command: 'javelinPlan', plan, steps }),
             onHypothesis: (hypothesis) => this._view?.webview.postMessage({ command: 'javelinHypothesis', hypothesis }),
-            onThinkingDelta: (delta) => this._view?.webview.postMessage({ command: 'agentDelta', delta }),
-            onThinking: (text) => {
-                const entry: ChatEntry = { role: 'assistant', content: text, timestamp: Date.now() };
-                this._conversationHistory.push(entry);
-                this._view?.webview.postMessage({ command: 'agentText', text });
-            },
+            onThinkingDelta: () => {},
+            onThinking: (_text, repeated) => this._view?.webview.postMessage({
+                command: 'agentStatus',
+                text: repeated ? 'The model repeated itself; recovering…' : 'Preparing the next action…',
+            }),
             onToolCall: (call) => this._view?.webview.postMessage({ command: 'toolCall', call }),
             onToolResult: (result) =>
                 this._view?.webview.postMessage({
@@ -435,6 +451,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         try {
             const result = await runJavelin({
                 task,
+                priorMessages: this._conversationHistory.slice(0, -1).map(({ role, content }) => ({ role, content })),
                 workspace,
                 engines,
                 signal: abort.signal,
@@ -463,6 +480,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                 command: 'agentEnd',
                 status: result.status,
                 summary: result.summary,
+                code: (result as any).code ?? null,
                 stepCount: result.steps.length,
                 verified: result.verified,
                 hypotheses: result.hypotheses,
@@ -474,7 +492,6 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         } finally {
             this._javelinAbort = undefined;
             this._pendingApproval = undefined;
-            this._view?.webview.postMessage({ command: 'agentDone' });
             await this.saveConversation();
         }
     }
@@ -495,6 +512,11 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
     /** Public wrapper: keep the last run's changes. */
     public acceptAllChanges() {
         this.acceptAll();
+    }
+
+    /** Public method to get conversation history for export. */
+    public getConversationHistory(): ChatEntry[] {
+        return [...this._conversationHistory];
     }
 
     /** Public wrapper: undo the last message you sent, and its file changes. */
@@ -611,9 +633,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         this._view?.webview.postMessage({
             command: 'config',
             providerId: provider.id,
-            providerLabel: provider.label,
             model: config.get<string>('model', provider.defaultModel),
-            requiresKey: provider.requiresKey,
             autonomy: config.get<Autonomy>('autonomy', AUTONOMY.ASK),
         });
     }
@@ -630,6 +650,9 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
     }
 
     private clearConversation() {
+        if (this._taskRunning) {
+            return;
+        }
         this._conversationHistory = [];
         // The marks point into the conversation, so they are meaningless once it is
         // cleared — leaving them would let "revert to last message" target a message
@@ -752,45 +775,65 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             return;
         }
 
-        const userEntry: ChatEntry = { role: 'user', content, timestamp: Date.now() };
-        this._conversationHistory.push(userEntry);
-
-        // Mark this message so the user can later revert to it: remember where it
-        // sits in the conversation, and snapshot the files as they are right now.
-        // The snapshot is what makes "revert to this message" undo the message's
-        // *effects*, not just delete its text.
-        const mark = {
-            entryIndex: this._conversationHistory.length - 1,
-            label: content.length > 60 ? `${content.slice(0, 60)}…` : content,
-            timestamp: Date.now(),
-            checkpointId: undefined as string | undefined,
-        };
-        try {
-            const workspace = this.getWorkspace();
-            if (workspace) {
-                const cp = await workspace.snapshot(`Before: ${mark.label}`);
-                mark.checkpointId = cp.id;
-                this._checkpoints.push(cp);
-                void this._context.globalState.update('checkpoints', this._checkpoints);
+        if (this._taskRunning) {
+            this._view.webview.postMessage({
+                command: 'error',
+                error: 'A task is already running. Stop it before starting another.',
+            });
+            return;
+        }
+        this._taskRunning = true;
+        if (mode === 'agent' || mode === 'javelin') {
+            if (mode === 'javelin') {
+                this._javelinAbort = new AbortController();
+            } else {
+                this._agentAbort = new AbortController();
             }
-        } catch {
-            // No workspace (or unsnapshottable): still allow reverting the chat text.
-        }
-        this._messageMarks.push(mark);
-        void this._context.globalState.update('messageMarks', this._messageMarks);
-
-        // The modal renders the user's task itself, so echoing it into the sidebar
-        // would duplicate it there.
-        if (!fromModal) {
-            this._view.webview.postMessage({ command: 'messageAdded', message: userEntry });
+            this._view.webview.postMessage({ command: 'agentStart', mode });
         }
 
-        if (mode === 'javelin') {
-            await this.runJavelinTask(content);
-        } else if (mode === 'agent') {
-            await this.runAgentTaskLoop(content, autoApproveSafe);
-        } else {
-            await this.runChat(content);
+        try {
+            const userEntry: ChatEntry = { role: 'user', content, timestamp: Date.now() };
+            this._conversationHistory.push(userEntry);
+
+            const mark = {
+                entryIndex: this._conversationHistory.length - 1,
+                label: content.length > 60 ? `${content.slice(0, 60)}…` : content,
+                timestamp: Date.now(),
+                checkpointId: undefined as string | undefined,
+            };
+            try {
+                const workspace = this.getWorkspace();
+                if (workspace) {
+                    const cp = await workspace.snapshot(`Before: ${mark.label}`);
+                    mark.checkpointId = cp.id;
+                    this._checkpoints.push(cp);
+                    void this._context.globalState.update('checkpoints', this._checkpoints);
+                }
+            } catch {
+                // Still allow reverting the chat text when a workspace cannot be snapshotted.
+            }
+            this._messageMarks.push(mark);
+            void this._context.globalState.update('messageMarks', this._messageMarks);
+
+            if (!fromModal) {
+                this._view.webview.postMessage({ command: 'messageAdded', message: userEntry });
+            }
+
+            if (mode === 'javelin') {
+                await this.runJavelinTask(content);
+            } else if (mode === 'agent') {
+                await this.runAgentTaskLoop(content, autoApproveSafe);
+            } else {
+                await this.runChat(content);
+            }
+        } finally {
+            if (mode === 'agent' || mode === 'javelin') {
+                this._view?.webview.postMessage({ command: 'agentDone' });
+            }
+            this._javelinAbort = undefined;
+            this._agentAbort = undefined;
+            this._taskRunning = false;
         }
     }
 
@@ -840,6 +883,11 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         if (!this._view) {
             return;
         }
+        const abort = this._agentAbort ?? new AbortController();
+        this._agentAbort = abort;
+        if (abort.signal.aborted) {
+            return;
+        }
 
         const workspace = this.getWorkspace();
         if (!workspace) {
@@ -853,33 +901,38 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         const config = vscode.workspace.getConfiguration('javelin');
         const providerId = config.get<string>('provider', DEFAULT_PROVIDER);
         const provider = getProvider(providerId);
+        if (provider.id !== 'javelin' && provider.id !== 'local') {
+            this._view.webview.postMessage({
+                command: 'error',
+                error: 'Only self-hosted Javelin and local Ollama providers are enabled.',
+            });
+            return;
+        }
         const baseUrl = config.get<string>('baseUrl', '') || provider.baseUrl;
         const model = config.get<string>('model', provider.defaultModel) || provider.defaultModel;
         const autonomy = config.get<Autonomy>('autonomy', AUTONOMY.ASK);
 
-        const apiKey = provider.requiresKey ? await getApiKey(this._context) : undefined;
-        if (provider.requiresKey && !apiKey) {
-            this._view.webview.postMessage({
-                command: 'error',
-                error: `Provider "${provider.label}" needs an API key. Run "Javelin AI: Set API Key", or switch to the local provider.`,
-            });
+        await ensureLocalOllama(baseUrl);
+        if (abort.signal.aborted) {
             return;
         }
-
-        const abort = new AbortController();
-        this._agentAbort = abort;
-
-        this._view.webview.postMessage({ command: 'agentStart' });
+        const check = await probeProviderModel({ providerId: provider.id, baseUrl, model });
+        if (abort.signal.aborted) {
+            return;
+        }
+        if (!check.ok) {
+            this._view.webview.postMessage({ command: 'error', error: check.detail });
+            return;
+        }
 
         const callbacks: AgentCallbacks = {
             onPhase: (phase) => this._view?.webview.postMessage({ command: 'agentPhase', phase }),
             onStatus: (text) => this._view?.webview.postMessage({ command: 'agentStatus', text }),
-            onAssistantText: (text) => {
-                const entry: ChatEntry = { role: 'assistant', content: text, timestamp: Date.now() };
-                this._conversationHistory.push(entry);
-                this._view?.webview.postMessage({ command: 'agentText', text });
-            },
-            onAssistantDelta: (delta) => this._view?.webview.postMessage({ command: 'agentDelta', delta }),
+            onAssistantText: (_text, repeated) => this._view?.webview.postMessage({
+                command: 'agentStatus',
+                text: repeated ? 'The model repeated itself; requesting a new action…' : 'Preparing the next action…',
+            }),
+            onAssistantDelta: () => {},
             onToolCall: (call) => this._view?.webview.postMessage({ command: 'toolCall', call }),
             onToolResult: (result) =>
                 this._view?.webview.postMessage({
@@ -929,7 +982,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             const result = await runAgent({
                 task,
                 workspace,
-                provider: { providerId, baseUrl, apiKey, model },
+                provider: { providerId, baseUrl, model },
                 signal: abort.signal,
                 callbacks,
                 autonomy,
@@ -942,6 +995,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                 command: 'agentEnd',
                 status: result.status,
                 summary: result.summary,
+                code: (result as any).code ?? null,
                 stepCount: result.steps.length,
             });
         } catch (error) {
@@ -949,7 +1003,6 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         } finally {
             this._agentAbort = undefined;
             this._pendingApproval = undefined;
-            this._view?.webview.postMessage({ command: 'agentDone' });
             await this.saveConversation();
         }
     }
@@ -1381,6 +1434,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         <h1>🚀 Javelin AI</h1>
         <div class="header-actions">
             <button class="icon-btn" id="agentModalBtn" title="Open the coding agent">🤖 Agent</button>
+            <button class="icon-btn" id="quickActionsBtn" title="Open code actions">Actions</button>
             <button class="icon-btn" id="settingsBtn" title="Open settings">Settings</button>
             <button class="icon-btn" id="clearBtn" title="Clear conversation">Clear</button>
         </div>
@@ -1465,6 +1519,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         const input = document.getElementById('input');
         const sendBtn = document.getElementById('sendBtn');
         const clearBtn = document.getElementById('clearBtn');
+        const quickActionsBtn = document.getElementById('quickActionsBtn');
         const settingsBtn = document.getElementById('settingsBtn');
         const modeChat = document.getElementById('modeChat');
         const modeAgent = document.getElementById('modeAgent');
@@ -1531,7 +1586,7 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             if (planEl) { planEl.remove(); }
             planEl = document.createElement('div');
             planEl.className = 'plan-card';
-            planEl.innerHTML = '<div class="plan-title">Javelin\'s plan</div><div class="plan-body"></div>';
+            planEl.innerHTML = '<div class="plan-title">Javelin&#39;s plan</div><div class="plan-body"></div>';
             planEl.querySelector('.plan-body').textContent = plan;
             chat.appendChild(planEl);
             chat.scrollTop = chat.scrollHeight;
@@ -1748,6 +1803,10 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             sendBtn.textContent = busy ? 'Stop' : (mode === 'agent' ? 'Run' : 'Send');
             sendBtn.className = 'send-btn' + (busy ? ' stop' : '');
             sendBtn.disabled = false;
+            clearBtn.disabled = busy;
+            modeChat.disabled = busy;
+            modeAgent.disabled = busy;
+            modeJavelin.disabled = busy;
             input.disabled = false;
             if (!busy) { input.focus(); }
         }
@@ -1798,6 +1857,10 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
             vscode.postMessage({ command: 'clearConversation' });
         });
 
+        quickActionsBtn.addEventListener('click', function () {
+            vscode.postMessage({ command: 'openQuickActions' });
+        });
+
         settingsBtn.addEventListener('click', function () {
             vscode.postMessage({ command: 'openSettings' });
         });
@@ -1831,7 +1894,12 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
         }
 
         function flushStream() {
-            if (streamEl) { streamEl = null; streamText = ''; }
+            if (streamEl) {
+                var cursor = streamEl.querySelector('.cursor');
+                if (cursor) { cursor.remove(); }
+                streamEl = null;
+                streamText = '';
+            }
         }
 
         function ensureSteps() {
@@ -2175,8 +2243,21 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     break;
                 case 'agentText':
                     hideLoading();
-                    flushStream();
-                    addMessage('assistant', message.text);
+                    if (message.repeated) {
+                        if (streamEl) {
+                            streamEl.parentElement.remove();
+                            streamEl = null;
+                            streamText = '';
+                        }
+                        break;
+                    }
+                    if (streamEl) {
+                        streamEl.innerHTML = renderMarkdown(message.text);
+                        streamEl = null;
+                        streamText = '';
+                    } else {
+                        addMessage('assistant', message.text);
+                    }
                     if (agentModalBusy) { agentLog(renderMarkdown(message.text)); }
                     break;
                 case 'toolCall':
@@ -2207,7 +2288,8 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     clearPhase();
                     completeTaskList();
                     if (agentModalBusy) {
-                        agentModalSummary.textContent = message.summary + ' — ' + message.stepCount + ' step(s)';
+                        agentModalSummary.textContent = message.summary + ' — ' + message.stepCount + ' step(s)'
+                            + (message.code ? ' · ' + message.code : '');
                     }
                     var summary = document.createElement('div');
                     summary.className = 'phase phase-visible';
@@ -2217,9 +2299,12 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     var diagNote = (message.hypotheses && message.hypotheses.length)
                         ? ' · ' + message.hypotheses.length + ' diagnosis(es)'
                         : '';
+                    var codeBadge = message.code
+                        ? ' <code title="Error code (see docs/ERROR-CODES.md)">' + escapeHtml(message.code) + '</code>'
+                        : '';
                     summary.innerHTML = '<span>' + (message.status === 'done' ? '✅' : (message.status === 'aborted' ? '⏹️' : '❌'))
                         + '</span><span>' + escapeHtml(message.summary) + ' — ' + message.stepCount
-                        + ' step(s)' + diagNote + '</span>' + verifiedBadge;
+                        + ' step(s)' + diagNote + '</span>' + verifiedBadge + codeBadge;
                     chat.appendChild(summary);
                     // Offer the decision whenever the run changed something. Revert is
                     // always available because the baseline is taken automatically.
@@ -2254,12 +2339,6 @@ export class JavelinPanel implements vscode.WebviewViewProvider {
                     setAgentBusy(false);
                     break;
                 case 'config':
-                    if (message.requiresKey) {
-                        var banner = document.createElement('div');
-                        banner.className = 'error';
-                        banner.textContent = message.providerLabel + ' needs an API key. Run "Javelin AI: Set API Key", or pick the local provider in Settings.';
-                        chat.insertBefore(banner, chat.firstChild);
-                    }
                     // Reflect the saved autonomy level in the modal's dropdown.
                     if (message.autonomy) {
                         agentModalAutonomy.value = message.autonomy;

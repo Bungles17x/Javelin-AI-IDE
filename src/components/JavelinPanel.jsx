@@ -21,7 +21,7 @@ const PHASE_TEXT = {
 export function PhaseRail({ phase, busy }) {
   const activeIndex = PHASE_ORDER.indexOf(phase)
   return (
-    <div className="flex items-center gap-1 overflow-x-auto rounded-lg border bg-card/60 px-3 py-2">
+    <div className="glass-card flex items-center gap-1 overflow-x-auto rounded-2xl px-3 py-2">
       <Brain className="mr-1 h-3.5 w-3.5 shrink-0 text-primary" />
       {PHASE_ORDER.map((p, i) => {
         const isActive = busy && i === activeIndex
@@ -51,7 +51,7 @@ export function PhaseRail({ phase, busy }) {
 export function PlanCard({ plan }) {
   if (!plan) return null
   return (
-    <div className="rounded-lg border bg-card p-3">
+    <div className="glass-card rounded-2xl p-3">
       <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium">
         <GitBranch className="h-3.5 w-3.5 text-primary" />
         Javelin&apos;s plan
@@ -65,7 +65,7 @@ export function PlanCard({ plan }) {
 export function HypothesisList({ hypotheses }) {
   if (!hypotheses?.length) return null
   return (
-    <div className="rounded-lg border-amber-300 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950/40">
+    <div className="glass-banner rounded-2xl border border-amber-300 bg-amber-50/80 p-3 dark:border-amber-800 dark:bg-amber-950/40">
       <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-amber-900 dark:text-amber-100">
         <Lightbulb className="h-3.5 w-3.5" />
         Diagnoses
@@ -105,7 +105,7 @@ export function JavelinSteps({ steps }) {
   const blocked = steps.filter((s) => s.name === 'repeat_blocked').length
 
   return (
-    <div className="overflow-hidden rounded-lg border bg-card">
+    <div className="glass-card overflow-hidden rounded-2xl border">
       <button
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent"
         onClick={() => setOpen((o) => !o)}
@@ -140,6 +140,9 @@ export function JavelinSteps({ steps }) {
 }
 
 function JavelinStepRow({ step }) {
+  const [outputOpen, setOutputOpen] = useState(
+    () => step.ok == null || step.ok === false || ['read_file', 'list_files', 'search_code'].includes(step.name),
+  )
   const Icon = STEP_ICON[step.name] ?? Activity
   const label = step.args?.path ?? step.args?.command ?? step.args?.query ?? step.args?.fact ?? step.args?.note ?? ''
 
@@ -159,10 +162,19 @@ function JavelinStepRow({ step }) {
           <span className="font-mono font-medium">{step.name}</span>
           {label && <span className="truncate font-mono text-muted-foreground">{label}</span>}
         </div>
-        {step.ok === false && step.output && (
-          <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap rounded border bg-red-50/60 px-2 py-1 text-[10px] text-red-900 dark:bg-red-950/30 dark:text-red-200">
-            {step.output}
-          </pre>
+        {step.output && (
+          <details
+            className="glass-inset mt-1 rounded-lg border"
+            open={outputOpen}
+            onToggle={(event) => setOutputOpen(event.currentTarget.open)}
+          >
+            <summary className="cursor-pointer px-2 py-1 text-[10px] text-muted-foreground">
+              {step.name === 'run_command' ? 'Command output' : 'Tool output'}
+            </summary>
+            <pre className={`max-h-40 overflow-auto whitespace-pre-wrap border-t px-2 py-1 text-[10px] ${step.ok === false ? 'bg-red-50/60 text-red-900 dark:bg-red-950/30 dark:text-red-200' : 'text-foreground'}`}>
+              {step.output}
+            </pre>
+          </details>
         )}
         {step.diff && (
           <div className="mt-1">
@@ -185,7 +197,7 @@ export function JavelinResult({ result }) {
         : 'border-red-300 bg-red-50 text-red-900 dark:border-red-800 dark:bg-red-950 dark:text-red-100'
 
   return (
-    <div className={`rounded-lg border p-3 text-xs ${tone}`}>
+    <div className={`glass-banner rounded-2xl border p-3 text-xs ${tone}`}>
       <p className="flex items-center gap-1.5 font-medium">
         {result.status === 'done' ? (
           <CheckCircle2 className="h-3.5 w-3.5" />
@@ -193,12 +205,26 @@ export function JavelinResult({ result }) {
           <XCircle className="h-3.5 w-3.5" />
         )}
         {result.status === 'done' ? 'Completed' : result.status === 'aborted' ? 'Stopped' : 'Could not complete'}
-        {result.verified && (
+        {result.confidence ? (
+          <span
+            className={`ml-1 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] text-white ${
+              result.confidence === 'verified'
+                ? 'bg-emerald-600'
+                : result.confidence === 'likely'
+                  ? 'bg-amber-600'
+                  : 'bg-slate-500'
+            }`}
+            title="Evidence classification: verified = check passed after the change; likely = evidence without a passing check; unverified = no evidence"
+          >
+            <ShieldCheck className="h-2.5 w-2.5" />
+            {result.confidence}
+          </span>
+        ) : result.verified ? (
           <span className="ml-1 flex items-center gap-1 rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] text-white">
             <ShieldCheck className="h-2.5 w-2.5" />
             verified
           </span>
-        )}
+        ) : null}
       </p>
       <p className="mt-1 opacity-90">{result.summary}</p>
       {result.hypotheses?.length > 0 && (
@@ -213,7 +239,7 @@ export function JavelinDiagnostics({ diagnostics, learnings, onRefresh }) {
   const [open, setOpen] = useState(false)
 
   return (
-    <div className="overflow-hidden rounded-lg border bg-card/60">
+    <div className="glass-card overflow-hidden rounded-2xl border">
       <button
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent"
         onClick={() => {

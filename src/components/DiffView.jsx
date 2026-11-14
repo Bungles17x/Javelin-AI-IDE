@@ -14,7 +14,7 @@ export function DiffView({ diff, path, defaultOpen = true, expanded = false }) {
   const lines = showAll ? diff.lines : collapseContext(diff.lines)
 
   return (
-    <div className="overflow-hidden rounded-md border bg-card">
+    <div className="glass-card overflow-hidden rounded-xl border">
       <button
         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-accent"
         onClick={() => setOpen((o) => !o)}

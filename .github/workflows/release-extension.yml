@@ -1,0 +1,54 @@
+name: Release VS Code extension
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            vscode-extension/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install extension dependencies
+        run: npm ci --prefix vscode-extension
+
+      - name: Verify tag matches extension version
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./vscode-extension/package.json').version")"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$package_version" != "$tag_version" ]; then
+            echo "Tag v$tag_version does not match extension version $package_version" >&2
+            exit 1
+          fi
+
+      - name: Compile extension
+        run: npm run compile --prefix vscode-extension
+
+      - name: Package VSIX
+        run: node build-vsix.mjs
+        env:
+          JAVELIN_ALLOW_ALL: 'true'
+
+      - name: Publish private GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" vscode-extension/javelin-fixed.vsix --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
