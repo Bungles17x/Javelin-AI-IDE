@@ -25,7 +25,7 @@ import { useJavelin } from './hooks/useJavelin'
 import { isSmallTalk, shouldRunWorkspaceAgent } from './core/taskIntent'
 import { GUEST_DAILY_LIMIT, OWNER_USERNAME, todayKey } from './lib/ownerAuth'
 import { estimateMessageTokens, estimateTokens, formatTokenCount, MEMBER_TOKEN_LIMIT, tokensForExchange } from './lib/usage'
-import { fetchAccount, readStoredAccountSession, signOut as signOutOnlineAccount, storeAccountSession } from './lib/accountAuth'
+import { fetchAccount, readStoredAccountSession, signOut as signOutOnlineAccount, storeAccountSession, syncChatHistory } from './lib/accountAuth'
 import { isConversational, isEcho, ECHO_RETRY_INSTRUCTION } from './core/conversation'
 import { createSpeaker, voiceCapabilities } from './lib/voice'
 import { createLocalDictation, openMicStream } from './lib/localSpeech'
@@ -34,11 +34,13 @@ import { createBargeIn } from './lib/bargeIn'
 import {
   Sparkles, Send, Square, Trash2, Settings, Sun, Moon, User, Bot, AlertCircle, KeyRound,
   MessageSquare, FolderOpen, Zap, CheckCircle2, XCircle, Brain, Mic, MicOff, Volume2, VolumeX,
-  Bug, LifeBuoy, Lock, ShieldCheck, PanelRightClose, Copy, Check, SquarePen,
-  Plus, X, FileText, ImagePlus, Download,
+  Bug, LifeBuoy, Lock, ShieldCheck, PanelRightClose, Copy, Check, SquarePen, Code2, History,
+  Plus, X, FileText, ImagePlus, Download, Search, Pencil, RefreshCw, Cloud,
 } from 'lucide-react'
 import { generateImage, imagePromptIssue, imageRequestSubject, isImageRequest } from './lib/imageGeneration'
 import { readImageForTextModel } from './lib/imageReading'
+import { buildSyncPayload, historyFingerprint, mergeHistory, pruneDeletedConversations } from './lib/chatHistory'
+import { generateChatTitle } from './lib/chatTitles'
 
 const STORAGE = {
   apiKey: 'javelin.apiKey',
@@ -66,7 +68,12 @@ const STORAGE = {
   accountUsage: 'javelin.accountUsage',
   assistantWidth: 'javelin.assistantWidth',
   assistantCollapsed: 'javelin.assistantCollapsed',
+  conversations: 'javelin.conversations',
+  activeConversation: 'javelin.activeConversation',
+  deletedConversations: 'javelin.deletedConversations',
 }
+
+const MAX_SAVED_CONVERSATIONS = 30
 
 // Chat replies are independent. A busy answer must not lock the composer; the
 // only shared limit is the number of requests this install will keep in flight.
@@ -233,6 +240,95 @@ function useLocalStorage(key, initial) {
   return [value, setValue]
 }
 
+function nextConversationId() {
+  return `chat-${nextMessageId()}`
+}
+
+function conversationTitle(messages = []) {
+  const first = messages.find((message) => (
+    message?.role === 'user' && String(message.content ?? '').trim()
+  ))
+  const text = String(first?.content ?? '').replace(/\s+/g, ' ').trim()
+  if (!text) return 'New chat'
+  return text.length > 58 ? `${text.slice(0, 57).trimEnd()}…` : text
+}
+
+function conversationFromMessages(messages, id = nextConversationId()) {
+  const now = Date.now()
+  return {
+    id,
+    title: conversationTitle(messages),
+    titleSource: 'auto',
+    createdAt: now,
+    updatedAt: now,
+    messages,
+  }
+}
+
+function normalizeConversation(value) {
+  if (!value || typeof value !== 'object') return null
+  if (!value.id || !Array.isArray(value.messages) || value.messages.length === 0) return null
+  const updatedAt = Number(value.updatedAt)
+  const createdAt = Number(value.createdAt)
+  return {
+    id: String(value.id),
+    title: String(value.title || conversationTitle(value.messages)),
+    titleSource: ['manual', 'ai', 'auto'].includes(value.titleSource) ? value.titleSource : 'auto',
+    createdAt: Number.isFinite(createdAt) ? createdAt : (Number.isFinite(updatedAt) ? updatedAt : Date.now()),
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
+    messages: value.messages.filter(Boolean),
+  }
+}
+
+/** Keep the most recent copy at the top and drop abandoned empty drafts. */
+function upsertConversation(list, id, messages) {
+  const existingList = (Array.isArray(list) ? list : []).filter(
+    (conversation) => conversation?.id && Array.isArray(conversation.messages),
+  )
+  if (!id || !Array.isArray(messages) || messages.length === 0) return existingList
+  const existing = existingList.find((conversation) => conversation.id === id)
+  // A name the user chose, or one the model generated, outranks the fallback
+  // derived from the first message.
+  const generatedName = existing && ['manual', 'ai'].includes(existing.titleSource)
+  const title = generatedName ? existing.title : conversationTitle(messages)
+  const titleSource = generatedName ? existing.titleSource : 'auto'
+  const sameMessages = existing && JSON.stringify(existing.messages) === JSON.stringify(messages)
+  if (existing && existing.title === title && existing.titleSource === titleSource && sameMessages) {
+    return existingList
+  }
+  const snapshot = existing
+    ? { ...existing, title, titleSource, updatedAt: Date.now(), messages }
+    : conversationFromMessages(messages, id)
+  return [snapshot, ...existingList.filter((conversation) => conversation.id !== id)]
+    .slice(0, MAX_SAVED_CONVERSATIONS)
+}
+
+function conversationDayLabel(timestamp, now = Date.now()) {
+  const date = new Date(Number(timestamp) || now)
+  const current = new Date(now)
+  const day = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+  const today = new Date(current.getFullYear(), current.getMonth(), current.getDate()).getTime()
+  const daysAgo = Math.round((today - day) / 86_400_000)
+  if (daysAgo <= 0) return 'Today'
+  if (daysAgo === 1) return 'Yesterday'
+  if (daysAgo < 7) return 'Previous 7 days'
+  return 'Older'
+}
+
+function groupConversations(conversations = [], now = Date.now()) {
+  const sorted = (Array.isArray(conversations) ? conversations : [])
+    .filter((conversation) => conversation?.id)
+    .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0))
+  const groups = []
+  for (const conversation of sorted) {
+    const label = conversationDayLabel(conversation.updatedAt, now)
+    const last = groups[groups.length - 1]
+    if (last?.label === label) last.items.push(conversation)
+    else groups.push({ label, items: [conversation] })
+  }
+  return groups
+}
+
 function useMobileChatViewport() {
   const [matches, setMatches] = useState(() => (
     typeof window !== 'undefined' && window.matchMedia?.('(max-width: 820px)').matches
@@ -301,6 +397,21 @@ function App() {
     window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
   )
   const [messages, setMessages] = useLocalStorage(STORAGE.messages, [])
+  const [conversations, setConversations] = useLocalStorage(STORAGE.conversations, [])
+  const [activeConversationId, setActiveConversationId] = useLocalStorage(STORAGE.activeConversation, null)
+  const [deletedConversations, setDeletedConversations] = useLocalStorage(STORAGE.deletedConversations, {})
+  const [historySync, setHistorySync] = useState({ state: 'idle', at: null, error: '' })
+  const [historyReady, setHistoryReady] = useState(false)
+  const historyInitializedRef = useRef(false)
+  const creatingConversationRef = useRef(false)
+  const historyRef = useRef({ conversations: [], deleted: {} })
+  const activeConversationIdRef = useRef(activeConversationId)
+  const historySyncInFlightRef = useRef(false)
+  const historySyncedFingerprintRef = useRef('')
+  const titleAttemptsRef = useRef(new Set())
+
+  historyRef.current = { conversations, deleted: deletedConversations }
+  activeConversationIdRef.current = activeConversationId
 
   // An interrupted run can leave an empty assistant message behind, which renders as
   // a permanent "Thinking…" bubble. Drop those on load rather than showing a ghost.
@@ -310,6 +421,60 @@ function App() {
       return cleaned.length === previous.length ? previous : cleaned
     })
   }, [setMessages])
+
+  // Bring the previous single-thread storage into the saved-chat list. The
+  // separate messages key remains the live thread, so streaming and all of the
+  // existing chat behavior keep working exactly as before.
+  useEffect(() => {
+    if (historyInitializedRef.current) return
+    historyInitializedRef.current = true
+    const stored = Array.isArray(conversations)
+      ? conversations.map(normalizeConversation).filter(Boolean).slice(0, MAX_SAVED_CONVERSATIONS)
+      : []
+    if (stored.length) setConversations(stored)
+    const active = stored.find((conversation) => conversation.id === activeConversationId)
+    if (active) {
+      if (!Array.isArray(messages) || messages.length === 0) {
+        if (active.messages.length) setMessages(active.messages)
+      }
+    } else if (activeConversationId) {
+      setActiveConversationId(null)
+    }
+    setHistoryReady(true)
+    // This migration runs once, before any conversation can be selected.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // A saved chat is created lazily on the first message of a new thread. This
+  // avoids filling history with empty "New chat" entries.
+  useEffect(() => {
+    if (!historyReady) return
+    if (activeConversationId) {
+      creatingConversationRef.current = false
+      return
+    }
+    if (!Array.isArray(messages) || messages.length === 0) {
+      creatingConversationRef.current = false
+      return
+    }
+    if (creatingConversationRef.current) return
+    creatingConversationRef.current = true
+    const id = nextConversationId()
+    setConversations((previous) => upsertConversation(previous, id, messages))
+    setActiveConversationId(id)
+  }, [activeConversationId, historyReady, messages, setActiveConversationId, setConversations])
+
+  // Streaming updates messages often, so persist the thread after a short pause
+  // instead of writing the full history on every token.
+  useEffect(() => {
+    if (!historyReady || !activeConversationId || !Array.isArray(messages) || messages.length === 0) {
+      return undefined
+    }
+    const timer = window.setTimeout(() => {
+      setConversations((previous) => upsertConversation(previous, activeConversationId, messages))
+    }, 450)
+    return () => window.clearTimeout(timer)
+  }, [activeConversationId, historyReady, messages, setConversations])
   const [mode, setMode] = useLocalStorage(STORAGE.mode, 'chat')
   useEffect(() => {
     if (mobileChatOnly && mode !== 'chat') setMode('chat')
@@ -344,6 +509,9 @@ function App() {
   const [workspaceDirectories, setWorkspaceDirectories] = useLocalStorage(STORAGE.directories, [])
   const [agentMemory, setAgentMemory] = useLocalStorage(STORAGE.memory, null)
   const [desktopProject, setDesktopProject] = useState(null)
+  // Desktop starts in the shared chat surface. The workbench is one click away
+  // for real files, so the chat keeps the same shape as the website.
+  const [desktopView, setDesktopView] = useState('chat')
   const [commandOutput, setCommandOutput] = useState([])
   const [runtimeStatus, setRuntimeStatus] = useState(null)
   const [runtimeBusy, setRuntimeBusy] = useState(false)
@@ -449,6 +617,7 @@ function App() {
   const [error, setError] = useState(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [supportOpen, setSupportOpen] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [assistantWidth, setAssistantWidth] = useLocalStorage(STORAGE.assistantWidth, 410)
   const [assistantCollapsed, setAssistantCollapsed] = useLocalStorage(STORAGE.assistantCollapsed, false)
 
@@ -473,6 +642,8 @@ function App() {
   const [guestUsage, setGuestUsage] = useLocalStorage(STORAGE.guestUsage, { date: '', count: 0 })
   const [accountUsage, setAccountUsage] = useLocalStorage(STORAGE.accountUsage, {})
   const account = accountSession?.user ?? null
+  const accountTokenRef = useRef(accountSession?.token ?? null)
+  accountTokenRef.current = accountSession?.token ?? null
   const isOnlineOwner = account?.role === 'owner'
   const isOnlineStaff = account?.role === 'staff'
   const isAdmin = isOnlineOwner || isOnlineStaff
@@ -997,6 +1168,179 @@ function App() {
   javelinRef.current = javelin
   const isBusy = isStreaming || activeChats > 0 || javelin.busy || imageBusy
 
+  // Name a new chat with the selected model once its first exchange is saved.
+  // The first-message fallback is already visible, so a failure is invisible and
+  // harmless rather than a chat that looks broken.
+  useEffect(() => {
+    if (!historyReady || !activeConversationId || isBusy) return undefined
+    if (provider.requiresKey && !apiKey) return undefined
+    const conversation = conversations.find((item) => item.id === activeConversationId)
+    if (!conversation || conversation.titleSource !== 'auto') return undefined
+    if (titleAttemptsRef.current.has(conversation.id)) return undefined
+    const hasUser = messages.some((message) => message.role === 'user' && String(message.content ?? '').trim())
+    const hasAssistant = messages.some((message) => message.role === 'assistant' && String(message.content ?? '').trim())
+    if (!hasUser || !hasAssistant) return undefined
+
+    if (!isOwner) {
+      if (account) {
+        if (accountRemaining <= 0) return undefined
+      } else {
+        if (guestUsed >= GUEST_DAILY_LIMIT) return undefined
+        setGuestUsage({ date: usageDate, count: guestUsed + 1 })
+      }
+    }
+    titleAttemptsRef.current.add(conversation.id)
+    const controller = new AbortController()
+    const requestTitle = () => generateChatTitle({
+      providerId,
+      baseUrl: baseUrl || provider.baseUrl,
+      apiKey,
+      model,
+      messages,
+      signal: controller.signal,
+    })
+    const request = providerId === 'javelinclouddirect' || providerId === 'javelincloud'
+      ? enqueueProviderTask(providerId, requestTitle, controller.signal)
+      : requestTitle()
+    request.then((result) => {
+      if (!result?.title) return
+      setConversations((previous) => (Array.isArray(previous) ? previous : []).map((item) => (
+        item.id === conversation.id && item.titleSource === 'auto'
+          ? { ...item, title: result.title, titleSource: 'ai', updatedAt: Date.now() }
+          : item
+      )))
+      if (result.usage) recordAccountTokens(tokensForExchange({ usage: result.usage }))
+    }).catch(() => {
+      // The first-message title remains in place.
+    })
+    return undefined
+  }, [account, accountRemaining, activeConversationId, apiKey, baseUrl, conversations, enqueueProviderTask, guestUsed, historyReady, isBusy, isOwner, messages, model, provider, providerId, recordAccountTokens, setConversations, setGuestUsage, usageDate])
+
+  const resetConversationRun = useCallback(() => {
+    setSteps([])
+    setCheckpoints([])
+    setRunResult(null)
+    setError(null)
+    setPhase(null)
+  }, [])
+
+  // Cloud history is merged, never blind-overwritten: a device can be offline
+  // for a while and still keep the chats it wrote in the meantime.
+  const performHistorySync = useCallback(async () => {
+    const token = accountSession?.token
+    if (!token || !historyReady || historySyncInFlightRef.current) return
+    historySyncInFlightRef.current = true
+    setHistorySync((previous) => ({ ...previous, state: 'syncing', error: '' }))
+    const sent = historyRef.current
+    const sentFingerprint = historyFingerprint(sent.conversations, sent.deleted)
+    try {
+      const remote = await syncChatHistory(token, buildSyncPayload(sent.conversations, sent.deleted))
+      // A response for a previous account must never be merged into the new one.
+      if (accountTokenRef.current !== token) return
+      const latest = historyRef.current
+      const merged = mergeHistory(latest.conversations, latest.deleted, remote)
+      setConversations(merged.conversations)
+      setDeletedConversations(merged.deleted)
+      historySyncedFingerprintRef.current = sentFingerprint
+      setHistorySync({ state: 'synced', at: Date.now(), error: '' })
+      const active = activeConversationIdRef.current
+      if (active && !merged.conversations.some((conversation) => conversation.id === active)) {
+        setActiveConversationId(null)
+        setMessages([])
+        resetConversationRun()
+      }
+    } catch (syncError) {
+      if (accountTokenRef.current !== token) return
+      setHistorySync({
+        state: syncError?.status === 401 ? 'signed-out' : 'error',
+        at: Date.now(),
+        error: syncError?.message || String(syncError),
+      })
+    } finally {
+      historySyncInFlightRef.current = false
+    }
+  }, [accountSession?.token, historyReady, resetConversationRun, setActiveConversationId, setConversations, setDeletedConversations, setMessages])
+
+  useEffect(() => {
+    historySyncedFingerprintRef.current = ''
+    historySyncInFlightRef.current = false
+    setHistorySync({ state: 'idle', at: null, error: '' })
+  }, [accountSession?.token])
+
+  // Wait until a stream settles, then upload the saved thread. The fingerprint
+  // stops a successful merge from scheduling the same snapshot again.
+  useEffect(() => {
+    if (!historyReady || !accountSession?.token) return undefined
+    if (historyFingerprint(conversations, deletedConversations) === historySyncedFingerprintRef.current) {
+      return undefined
+    }
+    const timer = window.setTimeout(() => void performHistorySync(), 1_200)
+    return () => window.clearTimeout(timer)
+  }, [accountSession?.token, conversations, deletedConversations, historyReady, performHistorySync])
+
+  const saveCurrentConversation = useCallback(() => {
+    if (!Array.isArray(messages) || messages.length === 0) return
+    if (activeConversationId) {
+      setConversations((previous) => upsertConversation(previous, activeConversationId, messages))
+      return
+    }
+    const id = nextConversationId()
+    setConversations((previous) => upsertConversation(previous, id, messages))
+  }, [activeConversationId, messages, setConversations])
+
+  const switchConversation = useCallback((id) => {
+    if (isBusy || !id || id === activeConversationId) return
+    const target = conversations.find((conversation) => conversation.id === id)
+    if (!target) return
+    saveCurrentConversation()
+    setActiveConversationId(id)
+    setMessages(Array.isArray(target.messages) ? target.messages : [])
+    resetConversationRun()
+    setHistoryOpen(false)
+  }, [activeConversationId, conversations, isBusy, resetConversationRun, saveCurrentConversation, setActiveConversationId, setMessages])
+
+  const startNewChat = useCallback(() => {
+    if (isBusy) return
+    saveCurrentConversation()
+    setActiveConversationId(null)
+    setMessages([])
+    resetConversationRun()
+    setHistoryOpen(false)
+  }, [isBusy, resetConversationRun, saveCurrentConversation, setActiveConversationId, setMessages])
+
+  const deleteConversation = useCallback((id) => {
+    if (isBusy || !id) return
+    setConversations((previous) => (
+      (Array.isArray(previous) ? previous : []).filter((conversation) => conversation.id !== id)
+    ))
+    setDeletedConversations((previous) => pruneDeletedConversations({
+      ...(previous && typeof previous === 'object' ? previous : {}),
+      [id]: Date.now(),
+    }))
+    if (id === activeConversationId) {
+      setActiveConversationId(null)
+      setMessages([])
+      resetConversationRun()
+    }
+  }, [activeConversationId, isBusy, resetConversationRun, setActiveConversationId, setConversations, setDeletedConversations, setMessages])
+
+  const renameConversation = useCallback((id, title) => {
+    const nextTitle = String(title ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)
+    if (!id || !nextTitle) return
+    setConversations((previous) => (Array.isArray(previous) ? previous : []).map((conversation) => (
+      conversation.id === id
+        ? { ...conversation, title: nextTitle, titleSource: 'manual', updatedAt: Date.now() }
+        : conversation
+    )))
+    // A rename is a newer revision than any deletion for this chat.
+    setDeletedConversations((previous) => {
+      if (!previous?.[id]) return previous
+      const next = { ...previous }
+      delete next[id]
+      return next
+    })
+  }, [setConversations, setDeletedConversations])
+
   const openDesktopProject = useCallback(async () => {
     const snapshot = await desktopApi?.openWorkspace()
     if (!snapshot) return null
@@ -1006,6 +1350,7 @@ function App() {
     setWorkspaceFiles(files)
     setWorkspaceDirectories(directories)
     setDesktopProject(snapshot)
+    setDesktopView('code')
     setMessages((previous) => [
       ...previous,
       { role: 'system', content: `Opened project ${snapshot.name} with ${snapshot.files.length} file(s).`, ts: Date.now() },
@@ -1023,6 +1368,7 @@ function App() {
     setWorkspaceFiles(files)
     setWorkspaceDirectories(directories)
     setDesktopProject(snapshot)
+    setDesktopView('code')
     setMessages((previous) => [
       ...previous,
       { role: 'system', content: `Created workspace ${snapshot.name}.`, ts: Date.now() },
@@ -1160,12 +1506,7 @@ function App() {
       // Ctrl/Cmd + L: Clear conversation
       if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
         e.preventDefault()
-        if (isBusy) return
-        setMessages([])
-        setSteps([])
-        setCheckpoints([])
-        setRunResult(null)
-        setError(null)
+        startNewChat()
       }
       // Ctrl/Cmd + ,: Open settings
       if ((e.ctrlKey || e.metaKey) && e.key === ',') {
@@ -1187,6 +1528,8 @@ function App() {
           javelinRef.current?.stop()
         } else if (settingsOpen) {
           setSettingsOpen(false)
+        } else if (historyOpen) {
+          setHistoryOpen(false)
         } else if (supportOpen) {
           setSupportOpen(false)
         }
@@ -1195,7 +1538,7 @@ function App() {
 
     window.addEventListener('keydown', handleGlobalKeydown)
     return () => window.removeEventListener('keydown', handleGlobalKeydown)
-  }, [assistantCollapsed, desktopApi, isBusy, setAssistantCollapsed, settingsOpen, stopChatResponses, supportOpen])
+  }, [assistantCollapsed, desktopApi, historyOpen, isBusy, setAssistantCollapsed, settingsOpen, startNewChat, stopChatResponses, supportOpen])
 
   useEffect(() => {
     const focusAssistant = () => {
@@ -2192,14 +2535,7 @@ function App() {
     URL.revokeObjectURL(url)
   }
 
-  const clear = () => {
-    if (isBusy) return
-    setMessages([])
-    setSteps([])
-    setCheckpoints([])
-    setRunResult(null)
-    setError(null)
-  }
+  const clear = startNewChat
 
   const onKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -2250,15 +2586,70 @@ function App() {
     : account
       ? 'is-account'
       : guestRemaining === 0 ? 'is-empty' : ''
+  const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId)
+  const activeConversationTitle = activeConversation?.title || conversationTitle(messages)
+  const historySyncLabel = !account
+    ? 'Saved on this device'
+    : historySync.state === 'syncing'
+      ? 'Syncing chats…'
+      : historySync.state === 'synced'
+        ? 'Chats synced'
+        : historySync.state === 'error' || historySync.state === 'signed-out'
+          ? 'Sync paused'
+          : 'Cloud sync ready'
+  const historySyncTitle = !account
+    ? 'Sign in to sync chats across devices'
+    : historySync.state === 'error'
+      ? historySync.error
+      : historySync.at
+        ? `Last synced ${new Date(historySync.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+        : 'Sync this account\'s chats across devices'
+
+  const showDesktopCode = Boolean(desktopApi && desktopView === 'code')
+  const desktopRootClass = showDesktopCode
+    ? `javelin-desktop-layout is-code-view${assistantCollapsed ? ' is-assistant-collapsed' : ''}`
+    : 'javelin-desktop-layout is-chat-view'
 
   return (
     <div
       className={desktopApi
-        ? `javelin-desktop-layout${assistantCollapsed ? ' is-assistant-collapsed' : ''}`
+        ? desktopRootClass
         : `javelin-browser-layout${mobileChatOnly ? ' is-mobile-chat' : ''}`}
       style={desktopApi ? { '--assistant-width': `${assistantPanelWidth}px` } : undefined}
     >
-      {desktopApi && (
+      <ChatSidebar
+        desktopApi={Boolean(desktopApi)}
+        codeView={showDesktopCode}
+        project={desktopProject}
+        onShowChat={() => setDesktopView('chat')}
+        onShowCode={() => setDesktopView('code')}
+        onNewChat={clear}
+        canNewChat={!isBusy}
+        conversations={conversations}
+        activeConversationId={activeConversationId}
+        activeConversationTitle={activeConversationTitle}
+        onSelectChat={switchConversation}
+        onDeleteChat={deleteConversation}
+        onRenameChat={renameConversation}
+        canSwitchChat={!isBusy}
+        isSignedIn={Boolean(accountSession?.token)}
+        syncLabel={historySyncLabel}
+        syncTitle={historySyncTitle}
+        syncState={historySync.state}
+        onSyncChats={() => void performHistorySync()}
+        onOpenProject={() => void openDesktopProject()}
+        onSettings={() => setSettingsOpen(true)}
+        onSupport={() => setSupportOpen(true)}
+        onAccount={() => requestAccount(account ? 'account' : 'default')}
+        accountName={account?.username ?? (isOwner ? 'Owner' : 'Guest')}
+        accountBadge={accountBadge}
+        accountTitle={isOwner
+          ? `Owner ${account?.username ?? OWNER_USERNAME} · open diagnostics`
+          : account
+            ? `${account.username} · ${formatTokenCount(accountRemaining)} tokens left`
+            : `Guest mode · ${guestRemaining} of ${GUEST_DAILY_LIMIT} AI requests left today`}
+      />
+      {desktopApi && showDesktopCode && (
         <ProjectWorkbench
           project={desktopProject}
           projectFiles={desktopProject?.files ?? []}
@@ -2280,7 +2671,7 @@ function App() {
           onRefreshRuntime={() => void refreshRuntimeStatus()}
         />
       )}
-      {desktopApi && !assistantCollapsed && (
+      {desktopApi && showDesktopCode && !assistantCollapsed && (
         <div
           className="panel-resizer assistant-resizer"
           role="separator"
@@ -2307,7 +2698,7 @@ function App() {
           }}
         />
       )}
-      {desktopApi && assistantCollapsed && (
+      {desktopApi && showDesktopCode && assistantCollapsed && (
         <button
           className="assistant-restore"
           type="button"
@@ -2327,6 +2718,20 @@ function App() {
       {/* Header */}
       <header className="app-header border-b">
         <div className="container mx-auto flex max-w-4xl items-center justify-between px-4 py-3">
+          <div className="javelin-chat-context">
+            <span className="javelin-chat-context-title">
+              {mode === 'chat' ? 'Chat' : mode === 'agent' ? 'Agent' : 'Javelin'}
+            </span>
+            <button
+              type="button"
+              className="javelin-chat-model"
+              onClick={() => setSettingsOpen(true)}
+              title={`${provider.label} · ${currentModel} — change model`}
+            >
+              {currentModel}
+              <span className="javelin-chat-model-caret" aria-hidden="true">⌄</span>
+            </button>
+          </div>
           <div className="brand-lockup">
             <span className="brand-emblem"><Sparkles size={14} /></span>
             <div className="brand-copy">
@@ -2403,6 +2808,18 @@ function App() {
                 Export changes
               </Button>
             )}
+            {mobileChatOnly && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="mobile-history-button"
+                onClick={() => setHistoryOpen(true)}
+                aria-label="Chat history"
+                title="Chat history"
+              >
+                <History className="h-4 w-4" />
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"
@@ -2425,7 +2842,7 @@ function App() {
             <Button
               variant="ghost"
               size="icon"
-              className="mobile-desktop-only"
+              className="mobile-desktop-only assistant-toggle"
               onClick={() => setAssistantCollapsed(true)}
               aria-label="Hide assistant"
               title="Hide assistant (Ctrl+Shift+A)"
@@ -2508,23 +2925,23 @@ function App() {
           {!hasMessages && (
             <div className="chat-hero">
               <span className="chat-hero-orb"><Bot size={23} /></span>
-              <span className="chat-hero-kicker">{mobileChatOnly ? 'JAVELIN CHAT' : 'JAVELIN WORKSPACE'}</span>
+              <span className="chat-hero-kicker">{mobileChatOnly ? 'JAVELIN CHAT' : 'JAVELIN AI'}</span>
               <h2 className="chat-hero-title">{mobileChatOnly
                 ? imageMode
                   ? 'What should we create?'
                   : 'What can I help you with?'
                 : mode === 'chat'
-                ? 'What are we building?'
+                ? 'What can I help with?'
                 : mode === 'agent'
-                  ? 'Give the agent a task'
-                  : 'Give Javelin a task'}</h2>
+                  ? 'What are we building?'
+                  : 'What should Javelin tackle?'}</h2>
               <p className="chat-hero-copy">
                 {mobileChatOnly
                   ? imageMode
                     ? 'Describe an original scene. I’ll generate an image and save it to your conversation.'
                     : 'Ask anything — questions, ideas, explanations, or a little help thinking it through.'
                   : mode === 'chat'
-                  ? 'Ask for explanations or advice. Direct requests to create or change project files automatically use Agent.'
+                  ? 'Ask anything. Switch to Code when you want to inspect or edit project files.'
                   : mode === 'agent'
                     ? 'It inspects the workspace, plans, edits with reviewable diffs, and reports what it verified.'
                     : 'Javelin runs its own reasoning loop: understand, plan, act, verify, and repair its own mistakes. It remembers what failed.'}
@@ -3049,6 +3466,72 @@ function App() {
       />
       </div>
       </div>
+      {mobileChatOnly && historyOpen && (
+        <div className="javelin-history-backdrop" onClick={() => setHistoryOpen(false)}>
+          <aside
+            className="javelin-history-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="javelin-history-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="javelin-history-head">
+              <strong id="javelin-history-title">Chats</strong>
+              <button
+                type="button"
+                className="javelin-history-close"
+                onClick={() => setHistoryOpen(false)}
+                aria-label="Close chat history"
+                title="Close"
+              >
+                <X size={17} />
+              </button>
+            </div>
+            <button
+              type="button"
+              className="javelin-gpt-new"
+              onClick={() => {
+                clear()
+                setHistoryOpen(false)
+              }}
+              disabled={isBusy}
+              title="New chat"
+            >
+              <SquarePen size={17} />
+              <span>New chat</span>
+            </button>
+            <div className="javelin-history-scroll">
+              <ConversationHistory
+                conversations={conversations}
+                activeConversationId={activeConversationId}
+                activeConversationTitle={activeConversationTitle}
+                onSelectChat={(id) => {
+                  switchConversation(id)
+                  setHistoryOpen(false)
+                }}
+                onDeleteChat={deleteConversation}
+                onRenameChat={renameConversation}
+                disabled={isBusy}
+                showEmpty
+              />
+            </div>
+            <div className="javelin-history-note">
+              <span>{historySyncLabel}</span>
+              {accountSession?.token && (
+                <button
+                  type="button"
+                  onClick={() => void performHistorySync()}
+                  disabled={historySync.state === 'syncing'}
+                  title={historySyncTitle}
+                >
+                  <RefreshCw size={12} />
+                  Sync now
+                </button>
+              )}
+            </div>
+          </aside>
+        </div>
+      )}
       <AdminScreen open={adminOpen} session={accountSession} onClose={() => setAdminOpen(false)} />
       <BanScreen
         ban={banNotice}
@@ -3105,6 +3588,312 @@ function GeneratedImage({ image }) {
         existing work — check before commercial use. Generated via Pollinations.
       </p>
     </figure>
+  )
+}
+
+function ChatSidebar({
+  desktopApi,
+  codeView,
+  project,
+  onShowChat,
+  onShowCode,
+  onNewChat,
+  canNewChat,
+  conversations,
+  activeConversationId,
+  activeConversationTitle,
+  onSelectChat,
+  onDeleteChat,
+  onRenameChat,
+  canSwitchChat,
+  isSignedIn,
+  syncLabel,
+  syncTitle,
+  syncState,
+  onSyncChats,
+  onOpenProject,
+  onSettings,
+  onSupport,
+  onAccount,
+  accountName,
+  accountBadge,
+  accountTitle,
+}) {
+  return (
+    <aside
+      className={`javelin-gpt-sidebar${codeView ? ' is-compact' : ''}`}
+      aria-label="Javelin navigation"
+    >
+      <div className="javelin-gpt-sidebar-head">
+        <button type="button" className="javelin-gpt-brand" onClick={onShowChat} title="Javelin">
+          <span className="javelin-gpt-brand-mark">J</span>
+          <span className="javelin-gpt-brand-name">Javelin</span>
+        </button>
+      </div>
+
+      <button
+        type="button"
+        className="javelin-gpt-new"
+        onClick={onNewChat}
+        disabled={!canNewChat}
+        title="New chat"
+      >
+        <SquarePen size={17} />
+        <span>New chat</span>
+      </button>
+
+      <nav className="javelin-gpt-nav" aria-label="Views">
+        <button
+          type="button"
+          className={!codeView ? 'is-active' : ''}
+          onClick={onShowChat}
+          title="Chat"
+          aria-current={!codeView ? 'page' : undefined}
+        >
+          <MessageSquare size={17} />
+          <span>Chat</span>
+        </button>
+        {desktopApi && (
+          <button
+            type="button"
+            className={codeView ? 'is-active' : ''}
+            onClick={onShowCode}
+            title="Code workspace"
+            aria-current={codeView ? 'page' : undefined}
+          >
+            <Code2 size={17} />
+            <span>Code workspace</span>
+          </button>
+        )}
+      </nav>
+
+      {!codeView && (
+        <>
+          <div className="javelin-gpt-history" aria-label="Chat history">
+            <ConversationHistory
+              conversations={conversations}
+              activeConversationId={activeConversationId}
+              activeConversationTitle={activeConversationTitle}
+              onSelectChat={onSelectChat}
+              onDeleteChat={onDeleteChat}
+              onRenameChat={onRenameChat}
+              disabled={!canSwitchChat}
+            />
+          </div>
+          <div className={`javelin-gpt-sync is-${syncState || 'idle'}`}>
+            <span className="javelin-gpt-sync-copy" title={syncTitle}>
+              <Cloud size={13} />
+              <span>{syncLabel}</span>
+            </span>
+            {isSignedIn && (
+              <button
+                type="button"
+                onClick={onSyncChats}
+                disabled={syncState === 'syncing'}
+                title={syncTitle || 'Sync chats now'}
+                aria-label="Sync chats now"
+              >
+                <RefreshCw size={12} />
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {desktopApi && (
+        <div className="javelin-gpt-section">
+          <span className="javelin-gpt-section-label">Workspace</span>
+          <button
+            type="button"
+            className="javelin-gpt-workspace"
+            onClick={project ? onShowCode : onOpenProject}
+            title={project?.name ?? 'Open a project folder'}
+          >
+            <FolderOpen size={17} />
+            <span>{project?.name ?? 'Open a project'}</span>
+          </button>
+        </div>
+      )}
+
+      <div className="javelin-gpt-sidebar-spacer" />
+
+      <div className="javelin-gpt-footer">
+        <button type="button" className="javelin-gpt-account" onClick={onAccount} title={accountTitle}>
+          <span className="javelin-gpt-avatar"><User size={15} /></span>
+          <span className="javelin-gpt-account-copy">
+            <strong>{accountName}</strong>
+            <small>{accountBadge}</small>
+          </span>
+        </button>
+        <button type="button" onClick={onSettings} title="Settings (Ctrl+,)">
+          <Settings size={17} />
+          <span>Settings</span>
+        </button>
+        <button type="button" onClick={onSupport} title="Email Javelin support">
+          <LifeBuoy size={17} />
+          <span>Support</span>
+        </button>
+      </div>
+    </aside>
+  )
+}
+
+function ConversationHistory({
+  conversations,
+  activeConversationId,
+  activeConversationTitle,
+  onSelectChat,
+  onDeleteChat,
+  onRenameChat,
+  disabled = false,
+  showEmpty = false,
+}) {
+  const [query, setQuery] = useState('')
+  const [editingId, setEditingId] = useState(null)
+  const [draft, setDraft] = useState('')
+  const total = Array.isArray(conversations) ? conversations.length : 0
+  const normalizedQuery = query.trim().toLowerCase()
+  const filtered = useMemo(() => {
+    const list = Array.isArray(conversations) ? conversations : []
+    if (!normalizedQuery) return list
+    return list.filter((conversation) => {
+      const title = String(conversation.title ?? '').toLowerCase()
+      if (title.includes(normalizedQuery)) return true
+      return (conversation.messages ?? []).some((message) => (
+        String(message?.content ?? '').toLowerCase().includes(normalizedQuery)
+      ))
+    })
+  }, [conversations, normalizedQuery])
+  const groups = groupConversations(filtered)
+
+  const beginRename = (conversation) => {
+    if (disabled || !onRenameChat) return
+    setEditingId(conversation.id)
+    setDraft(conversation.title || 'New chat')
+  }
+
+  const finishRename = (id, save = true) => {
+    if (save) {
+      const title = draft.replace(/\s+/g, ' ').trim()
+      if (title) onRenameChat?.(id, title)
+    }
+    setEditingId(null)
+    setDraft('')
+  }
+
+  const emptyMessage = total === 0
+    ? 'No saved chats yet. Start a conversation and it will appear here.'
+    : normalizedQuery
+      ? `No chats match “${query.trim()}”.`
+      : ''
+
+  return (
+    <>
+      {total > 0 && (
+        <label className="javelin-gpt-history-search">
+          <Search size={13} />
+          <input
+            type="search"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search chats"
+            aria-label="Search chats"
+          />
+          {query && (
+            <button type="button" onClick={() => setQuery('')} aria-label="Clear chat search" title="Clear search">
+              <X size={12} />
+            </button>
+          )}
+        </label>
+      )}
+      {groups.length === 0
+        ? (emptyMessage ? <p className="javelin-gpt-history-empty">{emptyMessage}</p> : null)
+        : groups.map((group) => (
+          <div className="javelin-gpt-history-group" key={group.label}>
+            <span className="javelin-gpt-history-label">{group.label}</span>
+            {group.items.map((conversation) => {
+              const isActive = conversation.id === activeConversationId
+              const title = isActive && activeConversationTitle
+                ? activeConversationTitle
+                : (conversation.title || 'New chat')
+              if (editingId === conversation.id) {
+                return (
+                  <form
+                    className="javelin-gpt-chat-rename"
+                    key={conversation.id}
+                    onSubmit={(event) => {
+                      event.preventDefault()
+                      finishRename(conversation.id, true)
+                    }}
+                  >
+                    <input
+                      value={draft}
+                      autoFocus
+                      maxLength={80}
+                      onChange={(event) => setDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          event.stopPropagation()
+                          finishRename(conversation.id, false)
+                        }
+                      }}
+                      onBlur={(event) => {
+                        if (!event.currentTarget.form?.contains(event.relatedTarget)) {
+                          finishRename(conversation.id, true)
+                        }
+                      }}
+                      aria-label={`Rename ${title}`}
+                    />
+                    <button type="submit" title="Save name" aria-label="Save name">
+                      <Check size={12} />
+                    </button>
+                  </form>
+                )
+              }
+              return (
+                <div
+                  className={`javelin-gpt-chat-row${isActive ? ' is-active' : ''}`}
+                  key={conversation.id}
+                >
+                  <button
+                    type="button"
+                    className="javelin-gpt-chat-open"
+                    onClick={() => onSelectChat?.(conversation.id)}
+                    disabled={disabled}
+                    title={title}
+                    aria-current={isActive ? 'true' : undefined}
+                  >
+                    <MessageSquare size={14} />
+                    <span>{title}</span>
+                  </button>
+                  <div className="javelin-gpt-chat-actions">
+                    <button
+                      type="button"
+                      className="javelin-gpt-chat-rename-button"
+                      onClick={() => beginRename(conversation)}
+                      disabled={disabled || !onRenameChat}
+                      title={`Rename ${title}`}
+                      aria-label={`Rename ${title}`}
+                    >
+                      <Pencil size={12} />
+                    </button>
+                    <button
+                      type="button"
+                      className="javelin-gpt-chat-delete"
+                      onClick={() => onDeleteChat?.(conversation.id)}
+                      disabled={disabled}
+                      title={`Delete ${title}`}
+                      aria-label={`Delete ${title}`}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        ))}
+    </>
   )
 }
 

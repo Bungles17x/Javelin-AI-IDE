@@ -33,12 +33,122 @@ const SUPPORT_TOPICS = {
 }
 const SUPPORT_COOLDOWN_MS = 30_000
 const SUPPORT_DAILY_LIMIT = 8
+const HISTORY_MAX_BYTES = 900_000
+const HISTORY_MAX_CONVERSATIONS = 30
+const HISTORY_MAX_TOMBSTONES = 200
+const HISTORY_MAX_MESSAGE_CHARS = 50_000
 
 let authSchemaReady = false
 let supportSchemaReady = false
 
 function authError(message, code, status = 400, details = null) {
   return json({ error: { message, type: 'javelin_auth_error', code, ...(details || {}) } }, status)
+}
+
+function historyTimestamp(value) {
+  const number = Number(value)
+  return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0
+}
+
+function cleanHistoryConversation(value) {
+  if (!value || typeof value !== 'object' || !Array.isArray(value.messages)) return null
+  const id = String(value.id ?? '').trim().slice(0, 120)
+  if (!id) return null
+  const messages = value.messages.slice(0, 500).map((message) => {
+    if (!message || typeof message !== 'object') return null
+    const role = ['user', 'assistant', 'system'].includes(message.role) ? message.role : ''
+    if (!role) return null
+    const clean = { role, content: String(message.content ?? '').slice(0, HISTORY_MAX_MESSAGE_CHARS) }
+    if (message.id) clean.id = String(message.id).slice(0, 120)
+    if (Number.isFinite(Number(message.ts))) clean.ts = Number(message.ts)
+    if (Array.isArray(message.attachments) && message.attachments.length) {
+      const attachments = message.attachments.slice(0, 8).map((attachment) => {
+        if (!attachment || typeof attachment !== 'object') return null
+        return {
+          id: String(attachment.id ?? '').slice(0, 120),
+          kind: attachment.kind === 'image' ? 'image' : 'file',
+          name: String(attachment.name ?? 'Attachment').slice(0, 240),
+          ...(attachment.mime ? { mime: String(attachment.mime).slice(0, 120) } : {}),
+          ...(Number.isFinite(Number(attachment.size)) ? { size: Number(attachment.size) } : {}),
+        }
+      }).filter(Boolean)
+      if (attachments.length) clean.attachments = attachments
+    }
+    if (message.image && typeof message.image === 'object') {
+      // Image bytes stay on the source device; the synced copy keeps only metadata.
+      clean.image = {
+        ...(message.image.status ? { status: String(message.image.status).slice(0, 24) } : {}),
+        ...(message.image.prompt ? { prompt: String(message.image.prompt).slice(0, 2_000) } : {}),
+        ...(message.image.seed !== undefined ? { seed: String(message.image.seed).slice(0, 120) } : {}),
+        ...(message.image.mime ? { mime: String(message.image.mime).slice(0, 120) } : {}),
+      }
+    }
+    return clean
+  }).filter(Boolean)
+  if (!messages.length) return null
+  const updatedAt = historyTimestamp(value.updatedAt)
+  return {
+    id,
+    title: String(value.title || 'New chat').slice(0, 120),
+    titleSource: ['manual', 'ai', 'auto'].includes(value.titleSource) ? value.titleSource : 'auto',
+    createdAt: historyTimestamp(value.createdAt) || updatedAt || Date.now(),
+    updatedAt: updatedAt || Date.now(),
+    messages,
+  }
+}
+
+function cleanHistoryTombstones(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([id, at]) => [String(id).trim().slice(0, 120), historyTimestamp(at)])
+      .filter(([id, at]) => id && at)
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, HISTORY_MAX_TOMBSTONES),
+  )
+}
+
+function normalizeHistoryDocument(value) {
+  const source = value && typeof value === 'object' ? value : {}
+  const conversations = (Array.isArray(source.conversations) ? source.conversations : [])
+    .map(cleanHistoryConversation)
+    .filter(Boolean)
+  return {
+    version: 1,
+    conversations,
+    deleted: cleanHistoryTombstones(source.deleted),
+  }
+}
+
+/**
+ * Merge two device snapshots without trusting whichever arrived last.
+ * Each chat keeps its newest revision, and a deletion applies until a newer
+ * revision of that same chat is uploaded (for example after an undo).
+ */
+function mergeHistoryPayloads(existingValue, incomingValue) {
+  const existing = normalizeHistoryDocument(existingValue)
+  const incoming = normalizeHistoryDocument(incomingValue)
+  const deleted = { ...existing.deleted }
+  for (const [id, at] of Object.entries(incoming.deleted)) {
+    deleted[id] = Math.max(Number(deleted[id]) || 0, at)
+  }
+
+  const byId = new Map()
+  const add = (conversation) => {
+    if (deleted[conversation.id] >= conversation.updatedAt) return
+    const current = byId.get(conversation.id)
+    if (!current || conversation.updatedAt > current.updatedAt) byId.set(conversation.id, conversation)
+  }
+  for (const conversation of existing.conversations) add(conversation)
+  for (const conversation of incoming.conversations) add(conversation)
+
+  return {
+    version: 1,
+    conversations: [...byId.values()]
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .slice(0, HISTORY_MAX_CONVERSATIONS),
+    deleted: cleanHistoryTombstones(deleted),
+  }
 }
 
 function bytesToBase64(bytes) {
@@ -781,6 +891,9 @@ async function ensureAuthSchema(env) {
     env.DB.prepare(
       'CREATE TABLE IF NOT EXISTS moderation_actions (id TEXT PRIMARY KEY, action TEXT NOT NULL, target_user_id TEXT NOT NULL, actor_user_id TEXT NOT NULL, reason TEXT, created_at INTEGER NOT NULL, expires_at INTEGER)',
     ),
+    env.DB.prepare(
+      'CREATE TABLE IF NOT EXISTS chat_history (user_id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL)',
+    ),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id)'),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at)'),
     env.DB.prepare('CREATE INDEX IF NOT EXISTS email_tokens_user_idx ON email_tokens(user_id, kind, created_at)'),
@@ -1313,6 +1426,62 @@ async function handleAuth(request, env, path, ctx) {
         user: publicUser(user),
       },
     })
+  }
+
+  if (path === '/history') {
+    const user = await currentUser(request, env)
+    if (!user) return authError('Your session has expired. Sign in again.', 'SESSION_EXPIRED', 401)
+
+    if (request.method === 'GET') {
+      const row = await env.DB.prepare('SELECT payload, updated_at FROM chat_history WHERE user_id = ?')
+        .bind(user.id)
+        .first()
+      let history = { version: 1, conversations: [], deleted: {} }
+      if (row?.payload) {
+        try {
+          history = normalizeHistoryDocument(JSON.parse(row.payload))
+        } catch {
+          history = { version: 1, conversations: [], deleted: {} }
+        }
+      }
+      return json({ history, updatedAt: Number(row?.updated_at) || null })
+    }
+
+    if (request.method !== 'POST') return authError('Use GET or POST.', 'METHOD_NOT_ALLOWED', 405)
+    const contentLength = Number(request.headers.get('content-length'))
+    if (Number.isFinite(contentLength) && contentLength > HISTORY_MAX_BYTES) {
+      return authError('This chat history is too large to sync.', 'HISTORY_TOO_LARGE', 413)
+    }
+    const body = await readAuthBody(request)
+    if (!body) return authError('The request body must be JSON.', 'INVALID_JSON')
+    const incoming = body.history ?? body
+    if (!incoming || typeof incoming !== 'object' || !Array.isArray(incoming.conversations)) {
+      return authError('The request does not contain a chat history.', 'INVALID_HISTORY', 400)
+    }
+
+    const row = await env.DB.prepare('SELECT payload FROM chat_history WHERE user_id = ?')
+      .bind(user.id)
+      .first()
+    let existing = null
+    if (row?.payload) {
+      try {
+        existing = JSON.parse(row.payload)
+      } catch {
+        existing = null
+      }
+    }
+    const merged = mergeHistoryPayloads(existing, incoming)
+    const serialized = JSON.stringify(merged)
+    if (new TextEncoder().encode(serialized).length > HISTORY_MAX_BYTES) {
+      return authError('This chat history is too large to sync.', 'HISTORY_TOO_LARGE', 413)
+    }
+    const updatedAt = Date.now()
+    await env.DB.prepare(
+      'INSERT INTO chat_history (user_id, payload, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at',
+    )
+      .bind(user.id, serialized, updatedAt)
+      .run()
+    return json({ history: merged, updatedAt })
   }
 
   if (path === '/me') {
@@ -1899,6 +2068,7 @@ export default {
         passwordReset: true,
         supportForm: true,
         admin: true,
+        historySync: true,
       })
     }
 

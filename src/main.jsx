@@ -5,6 +5,7 @@ import { ErrorBoundary } from './components/ErrorScreen.jsx'
 import './index.css'
 import './liquid-glass.css'
 import './system-screens.css'
+import './chatgpt-shell.css'
 
 /*
  * Voice diagnostics without a microphone: `await javelinSpeechProbe(2)` in the

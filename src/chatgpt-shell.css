@@ -1,0 +1,1503 @@
+/*
+ * Shared chat surface.
+ *
+ * The website and the desktop app use the same conversation layout: a quiet
+ * navigation rail, a centered thread, and a floating composer. The desktop adds
+ * a compact Code workspace rail that reveals the existing Monaco workbench
+ * without changing any of the coding features.
+ */
+
+:root {
+  --gpt-bg: #ffffff;
+  --gpt-sidebar: #f7f7f8;
+  --gpt-surface: #f4f4f4;
+  --gpt-surface-strong: #ececec;
+  --gpt-text: #111111;
+  --gpt-muted: #6b6b76;
+  --gpt-border: #e5e5e7;
+  --gpt-user: #f1f1f2;
+  --gpt-primary: #111111;
+  --gpt-primary-foreground: #ffffff;
+  --gpt-hover: #ececee;
+}
+
+.dark {
+  --gpt-bg: #212121;
+  --gpt-sidebar: #171717;
+  --gpt-surface: #2f2f2f;
+  --gpt-surface-strong: #3a3a3a;
+  --gpt-text: #ececec;
+  --gpt-muted: #a8a8b3;
+  --gpt-border: #3a3a3a;
+  --gpt-user: #2f2f2f;
+  --gpt-primary: #ffffff;
+  --gpt-primary-foreground: #171717;
+  --gpt-hover: #2a2a2a;
+}
+
+/* ---------- Shared shell and sidebar ---------- */
+
+.javelin-browser-layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--gpt-bg);
+  color: var(--gpt-text);
+}
+
+.javelin-browser-shell {
+  min-width: 0;
+  min-height: 0;
+  height: 100vh;
+}
+
+.javelin-browser-layout .app-shell,
+.javelin-desktop-layout.is-chat-view .app-shell {
+  background: var(--gpt-bg) !important;
+  color: var(--gpt-text);
+}
+
+.javelin-desktop-layout.is-chat-view {
+  grid-template-columns: 260px minmax(0, 1fr);
+  background: var(--gpt-bg);
+  color: var(--gpt-text);
+}
+
+.javelin-desktop-layout.is-code-view {
+  grid-template-columns: 64px minmax(0, 1fr) var(--assistant-width, 410px);
+}
+
+.javelin-desktop-layout.is-code-view.is-assistant-collapsed {
+  grid-template-columns: 64px minmax(0, 1fr);
+}
+
+.javelin-desktop-layout.is-chat-view .javelin-assistant-column {
+  grid-column: 2;
+  border-left: 0;
+  background: var(--gpt-bg);
+  color: var(--gpt-text);
+  --background: 0 0% 100%;
+  --foreground: 0 0% 7%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 7%;
+  --muted: 0 0% 96%;
+  --muted-foreground: 0 0% 43%;
+  --border: 0 0% 90%;
+  --input: 0 0% 90%;
+  --primary: 0 0% 7%;
+  --primary-foreground: 0 0% 100%;
+  --ring: 0 0% 20%;
+  color-scheme: light;
+}
+
+html.dark .javelin-desktop-layout.is-chat-view .javelin-assistant-column {
+  --background: 0 0% 13%;
+  --foreground: 0 0% 93%;
+  --card: 0 0% 13%;
+  --card-foreground: 0 0% 93%;
+  --muted: 0 0% 18%;
+  --muted-foreground: 0 0% 67%;
+  --border: 0 0% 23%;
+  --input: 0 0% 23%;
+  --primary: 0 0% 100%;
+  --primary-foreground: 0 0% 9%;
+  --ring: 0 0% 85%;
+  color-scheme: dark;
+}
+
+.javelin-gpt-sidebar {
+  z-index: 3;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 10px 10px;
+  border-right: 1px solid var(--gpt-border);
+  background: var(--gpt-sidebar);
+  color: var(--gpt-text);
+}
+
+.javelin-gpt-sidebar-head {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  padding: 0 6px;
+}
+
+.javelin-gpt-brand {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.javelin-gpt-brand:hover { background: var(--gpt-hover); }
+
+.javelin-gpt-brand-mark {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--gpt-text);
+  color: var(--gpt-bg);
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -0.06em;
+}
+
+.javelin-gpt-brand-name {
+  overflow: hidden;
+  color: var(--gpt-text);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javelin-gpt-new,
+.javelin-gpt-nav button,
+.javelin-gpt-workspace,
+.javelin-gpt-footer > button {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--gpt-text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.javelin-gpt-new {
+  min-height: 42px;
+  padding: 0 11px;
+  border: 1px solid var(--gpt-border);
+  font-weight: 600;
+}
+
+.javelin-gpt-new:hover:not(:disabled) { background: var(--gpt-hover); }
+.javelin-gpt-new:disabled { cursor: default; opacity: 0.45; }
+
+.javelin-gpt-nav {
+  display: grid;
+  gap: 2px;
+}
+
+.javelin-gpt-nav button,
+.javelin-gpt-workspace,
+.javelin-gpt-footer > button {
+  min-height: 38px;
+  padding: 0 10px;
+  color: var(--gpt-muted);
+}
+
+.javelin-gpt-nav button:hover,
+.javelin-gpt-workspace:hover,
+.javelin-gpt-footer > button:hover {
+  background: var(--gpt-hover);
+  color: var(--gpt-text);
+}
+
+.javelin-gpt-nav button.is-active {
+  background: var(--gpt-surface);
+  color: var(--gpt-text);
+  font-weight: 600;
+}
+
+.javelin-gpt-nav svg,
+.javelin-gpt-new svg,
+.javelin-gpt-workspace svg,
+.javelin-gpt-footer svg { flex: 0 0 auto; }
+
+.javelin-gpt-section {
+  display: grid;
+  gap: 2px;
+  margin-top: 10px;
+}
+
+.javelin-gpt-section-label {
+  padding: 0 10px 4px;
+  color: var(--gpt-muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.javelin-gpt-history {
+  display: flex;
+  max-height: min(34vh, 330px);
+  min-height: 0;
+  flex-direction: column;
+  gap: 9px;
+  overflow-y: auto;
+  padding: 7px 3px 2px;
+}
+
+.javelin-gpt-history:empty { display: none; }
+
+.javelin-gpt-history-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  min-height: 32px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  border: 1px solid var(--gpt-border);
+  border-radius: 9px;
+  background: var(--gpt-sidebar);
+  color: var(--gpt-muted);
+}
+
+.javelin-gpt-history-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--gpt-text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.javelin-gpt-history-search input::placeholder { color: var(--gpt-muted); }
+.javelin-gpt-history-search input::-webkit-search-cancel-button { display: none; }
+
+.javelin-gpt-history-search button {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--gpt-muted);
+  cursor: pointer;
+}
+
+.javelin-gpt-history-search button:hover { background: var(--gpt-hover); color: var(--gpt-text); }
+
+.javelin-gpt-history-group {
+  display: grid;
+  gap: 1px;
+}
+
+.javelin-gpt-history-label {
+  padding: 0 8px 4px;
+  color: var(--gpt-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.javelin-gpt-chat-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  border-radius: 8px;
+}
+
+.javelin-gpt-chat-open {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  gap: 9px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--gpt-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.javelin-gpt-chat-open svg { flex: 0 0 auto; opacity: 0.7; }
+.javelin-gpt-chat-open span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.javelin-gpt-chat-open:hover:not(:disabled) { background: var(--gpt-hover); color: var(--gpt-text); }
+.javelin-gpt-chat-open:disabled { cursor: default; opacity: 0.5; }
+
+.javelin-gpt-chat-row.is-active { background: var(--gpt-surface); }
+.javelin-gpt-chat-row.is-active .javelin-gpt-chat-open { color: var(--gpt-text); font-weight: 550; }
+.javelin-gpt-chat-row.is-active .javelin-gpt-chat-open svg { opacity: 1; }
+
+.javelin-gpt-chat-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  opacity: 0;
+}
+
+.javelin-gpt-chat-delete,
+.javelin-gpt-chat-rename-button {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gpt-muted);
+  cursor: pointer;
+}
+
+.javelin-gpt-chat-delete { margin-right: 3px; }
+
+.javelin-gpt-chat-row:hover .javelin-gpt-chat-actions,
+.javelin-gpt-chat-actions:focus-within { opacity: 1; }
+.javelin-gpt-chat-delete:hover:not(:disabled),
+.javelin-gpt-chat-rename-button:hover:not(:disabled) {
+  background: var(--gpt-surface-strong);
+  color: var(--gpt-text);
+}
+.javelin-gpt-chat-delete:disabled,
+.javelin-gpt-chat-rename-button:disabled { cursor: default; }
+
+.javelin-gpt-chat-rename {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 3px 1px 1px;
+  border: 1px solid var(--gpt-border);
+  border-radius: 8px;
+  background: var(--gpt-bg);
+}
+
+.javelin-gpt-chat-rename input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 7px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--gpt-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.javelin-gpt-chat-rename button {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: var(--gpt-surface);
+  color: var(--gpt-text);
+  cursor: pointer;
+}
+
+.javelin-gpt-chat-rename button:hover { background: var(--gpt-surface-strong); }
+
+.javelin-gpt-history-empty {
+  padding: 7px 9px 4px;
+  color: var(--gpt-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.javelin-gpt-workspace span,
+.javelin-gpt-nav span,
+.javelin-gpt-new span,
+.javelin-gpt-footer span:not(.javelin-gpt-avatar) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javelin-gpt-sync {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 2px 5px 0;
+  color: var(--gpt-muted);
+  font-size: 10px;
+}
+
+.javelin-gpt-sync-copy {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+}
+
+.javelin-gpt-sync-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javelin-gpt-sync.is-error,
+.javelin-gpt-sync.is-signed-out { color: #b45309; }
+
+.javelin-gpt-sync button {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.javelin-gpt-sync button:hover:not(:disabled) { background: var(--gpt-hover); color: var(--gpt-text); }
+.javelin-gpt-sync button:disabled { opacity: 0.45; cursor: default; }
+
+.javelin-gpt-sidebar-spacer { flex: 1 1 auto; }
+
+.javelin-gpt-footer {
+  display: grid;
+  gap: 2px;
+  padding-top: 8px;
+  border-top: 1px solid var(--gpt-border);
+}
+
+.javelin-gpt-account { min-height: 48px !important; }
+
+.javelin-gpt-avatar {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--gpt-surface-strong);
+  color: var(--gpt-text);
+}
+
+.javelin-gpt-account-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.javelin-gpt-account-copy strong,
+.javelin-gpt-account-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javelin-gpt-account-copy strong { font-size: 12px; font-weight: 600; }
+.javelin-gpt-account-copy small { color: var(--gpt-muted); font-size: 10px; font-weight: 400; }
+
+.mobile-history-button { display: none; }
+
+.javelin-history-backdrop {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: flex;
+  background: rgba(0, 0, 0, 0.42);
+  animation: javelin-history-fade 140ms ease-out;
+}
+
+.javelin-history-drawer {
+  display: flex;
+  width: min(88vw, 360px);
+  height: 100%;
+  flex-direction: column;
+  gap: 9px;
+  padding: 14px 12px 12px;
+  border-right: 1px solid var(--gpt-border);
+  background: var(--gpt-sidebar);
+  color: var(--gpt-text);
+  box-shadow: 18px 0 42px rgba(0, 0, 0, 0.25);
+  animation: javelin-history-slide 180ms ease-out;
+}
+
+.javelin-history-head {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 3px;
+}
+
+.javelin-history-head strong {
+  color: var(--gpt-text);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.javelin-history-close {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--gpt-muted);
+  cursor: pointer;
+}
+
+.javelin-history-close:hover { background: var(--gpt-hover); color: var(--gpt-text); }
+
+.javelin-history-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding-top: 4px;
+  border-top: 1px solid var(--gpt-border);
+}
+
+.javelin-history-scroll .javelin-gpt-history {
+  max-height: none;
+  gap: 10px;
+  padding: 7px 2px 2px;
+  overflow: visible;
+}
+
+.javelin-history-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 0;
+  padding: 9px 4px 2px;
+  border-top: 1px solid var(--gpt-border);
+  color: var(--gpt-muted);
+  font-size: 10px;
+}
+
+.javelin-history-note button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--gpt-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gpt-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.javelin-history-note button:hover:not(:disabled) { background: var(--gpt-hover); }
+.javelin-history-note button:disabled { opacity: 0.5; cursor: default; }
+
+@keyframes javelin-history-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes javelin-history-slide {
+  from { transform: translateX(-12px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@media (hover: none) {
+  .javelin-gpt-chat-actions { opacity: 0.7; }
+}
+
+@media (max-width: 820px) {
+  .mobile-history-button { display: inline-flex; }
+}
+
+/* The code view keeps the IDE palette but gives the chat shell a slim rail. */
+.javelin-desktop-layout.is-code-view .javelin-gpt-sidebar {
+  gap: 6px;
+  padding: 10px 6px;
+  border-right-color: var(--ide-border);
+  background: #141815;
+  color: var(--ide-text);
+}
+
+.javelin-desktop-layout.is-code-view .javelin-gpt-sidebar-head { padding: 0; justify-content: center; }
+.javelin-desktop-layout.is-code-view .javelin-gpt-brand { padding: 3px; }
+.javelin-desktop-layout.is-code-view .javelin-gpt-brand:hover { background: #242c25; }
+.javelin-desktop-layout.is-code-view .javelin-gpt-brand-mark { background: var(--ide-accent); color: #17200c; }
+.javelin-desktop-layout.is-code-view .javelin-gpt-brand-name,
+.javelin-desktop-layout.is-code-view .javelin-gpt-new span,
+.javelin-desktop-layout.is-code-view .javelin-gpt-nav span,
+.javelin-desktop-layout.is-code-view .javelin-gpt-section,
+.javelin-desktop-layout.is-code-view .javelin-gpt-footer span:not(.javelin-gpt-avatar) { display: none; }
+.javelin-desktop-layout.is-code-view .javelin-gpt-new,
+.javelin-desktop-layout.is-code-view .javelin-gpt-nav button,
+.javelin-desktop-layout.is-code-view .javelin-gpt-footer > button {
+  width: 40px;
+  min-height: 40px;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  color: var(--ide-muted);
+}
+.javelin-desktop-layout.is-code-view .javelin-gpt-new {
+  margin: 0 auto;
+  border: 1px solid var(--ide-border);
+  border-radius: 9px;
+  background: var(--ide-panel-raised);
+}
+.javelin-desktop-layout.is-code-view .javelin-gpt-nav { justify-items: center; }
+.javelin-desktop-layout.is-code-view .javelin-gpt-nav button:hover,
+.javelin-desktop-layout.is-code-view .javelin-gpt-footer > button:hover { background: #242c25; color: var(--ide-text); }
+.javelin-desktop-layout.is-code-view .javelin-gpt-nav button.is-active {
+  background: #29352a;
+  color: var(--ide-accent);
+  box-shadow: inset 2px 0 0 var(--ide-accent);
+}
+.javelin-desktop-layout.is-code-view .javelin-gpt-footer { align-items: center; }
+.javelin-desktop-layout.is-code-view .javelin-gpt-avatar { width: 25px; height: 25px; background: #29352a; color: var(--ide-accent); }
+
+/* ---------- Header ---------- */
+
+.javelin-chat-context { display: none; }
+
+.javelin-desktop-layout.is-chat-view .javelin-chat-context,
+.javelin-browser-layout:not(.is-mobile-chat) .javelin-chat-context {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+.javelin-chat-context-title {
+  color: var(--gpt-text);
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.javelin-chat-model {
+  display: inline-flex;
+  max-width: 230px;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  padding: 5px 8px;
+  border: 1px solid var(--gpt-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--gpt-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.javelin-chat-model:hover { background: var(--gpt-surface); color: var(--gpt-text); }
+.javelin-chat-model-caret { color: var(--gpt-muted); font-size: 13px; line-height: 1; }
+
+.javelin-desktop-layout.is-chat-view .javelin-assistant-column .app-header,
+.javelin-browser-layout:not(.is-mobile-chat) .app-header {
+  border-bottom: 1px solid var(--gpt-border) !important;
+  background: var(--gpt-bg) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.javelin-desktop-layout.is-chat-view .javelin-assistant-column .app-header > div,
+.javelin-browser-layout:not(.is-mobile-chat) .app-header > div {
+  max-width: 860px !important;
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.javelin-desktop-layout.is-chat-view .brand-lockup,
+.javelin-browser-layout:not(.is-mobile-chat) .brand-lockup { display: none; }
+
+.javelin-desktop-layout.is-chat-view .assistant-toggle { display: none; }
+.javelin-desktop-layout.is-chat-view .workspace-file-count,
+.javelin-browser-layout:not(.is-mobile-chat) .workspace-file-count { display: none; }
+
+.javelin-desktop-layout.is-chat-view .javelin-assistant-column .owner-chip { display: none; }
+
+.javelin-desktop-layout.is-chat-view .javelin-assistant-column .mode-menu,
+.javelin-browser-layout:not(.is-mobile-chat) .mode-menu {
+  justify-content: flex-start;
+  gap: 3px;
+  margin: 0;
+}
+
+.javelin-desktop-layout.is-chat-view .javelin-assistant-column .mode-menu,
+.javelin-browser-layout:not(.is-mobile-chat) .mode-menu {
+  padding: 3px;
+  border: 1px solid var(--gpt-border);
+  border-radius: 11px;
+  background: var(--gpt-surface);
+}
+
+.javelin-desktop-layout.is-chat-view .mode-tab,
+.javelin-browser-layout:not(.is-mobile-chat) .mode-tab {
+  padding: 5px 11px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--gpt-muted);
+  font-size: 12px;
+}
+
+.javelin-desktop-layout.is-chat-view .mode-tab:hover:not(:disabled),
+.javelin-browser-layout:not(.is-mobile-chat) .mode-tab:hover:not(:disabled) {
+  border: 0;
+  background: var(--gpt-hover);
+  box-shadow: none;
+}
+
+.javelin-desktop-layout.is-chat-view .mode-tab.is-active,
+.javelin-browser-layout:not(.is-mobile-chat) .mode-tab.is-active {
+  border: 0;
+  background: var(--gpt-bg) !important;
+  color: var(--gpt-text) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.javelin-desktop-layout.is-chat-view .autonomy-menu,
+.javelin-browser-layout:not(.is-mobile-chat) .autonomy-menu {
+  margin-left: 6px;
+  color: var(--gpt-muted);
+}
+
+.javelin-desktop-layout.is-chat-view .autonomy-menu select,
+.javelin-browser-layout:not(.is-mobile-chat) .autonomy-menu select {
+  border-color: var(--gpt-border);
+  background: var(--gpt-bg);
+  color: var(--gpt-text);
+}
+
+/* ---------- Conversation ---------- */
+
+.javelin-desktop-layout.is-chat-view .javelin-assistant-column main,
+.javelin-browser-layout:not(.is-mobile-chat) main {
+  background: var(--gpt-bg);
+}
+
+.javelin-desktop-layout.is-chat-view .javelin-assistant-column main > div,
+.javelin-browser-layout:not(.is-mobile-chat) main > div {
+  max-width: 860px !important;
+  padding: 30px 28px 40px;
+}
+
+.javelin-desktop-layout.is-chat-view .javelin-assistant-column .space-y-4 > * + *,
+.javelin-browser-layout:not(.is-mobile-chat) .space-y-4 > * + * {
+  margin-top: 1.4rem;
+}
+
+.javelin-desktop-layout.is-chat-view .message-row,
+.javelin-browser-layout:not(.is-mobile-chat) .message-row {
+  gap: 12px;
+}
+
+.javelin-desktop-layout.is-chat-view .msg-avatar,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-avatar {
+  width: 29px;
+  height: 29px;
+  border: 0;
+  background: var(--gpt-text);
+  color: var(--gpt-bg);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.javelin-desktop-layout.is-chat-view .message-row.justify-end .msg-avatar,
+.javelin-browser-layout:not(.is-mobile-chat) .message-row.justify-end .msg-avatar {
+  display: none;
+}
+
+.javelin-desktop-layout.is-chat-view .msg,
+.javelin-browser-layout:not(.is-mobile-chat) .msg {
+  border-radius: 19px;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.javelin-desktop-layout.is-chat-view .msg-assistant,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-assistant {
+  max-width: 100%;
+  padding: 2px 0;
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--gpt-text) !important;
+}
+
+.javelin-desktop-layout.is-chat-view .msg-user,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-user {
+  max-width: min(78%, 640px);
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 20px;
+  background: var(--gpt-user) !important;
+  box-shadow: none !important;
+  color: var(--gpt-text) !important;
+}
+
+.javelin-desktop-layout.is-chat-view .msg-user p,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-user p {
+  font-size: 0.94rem;
+  line-height: 1.55;
+}
+
+.javelin-desktop-layout.is-chat-view .msg-user a,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-user a { color: var(--gpt-text); }
+
+.javelin-desktop-layout.is-chat-view .msg-assistant .prose-javelin,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-assistant .prose-javelin {
+  color: var(--gpt-text);
+  font-size: 0.96rem;
+  line-height: 1.7;
+}
+
+.javelin-desktop-layout.is-chat-view .msg-assistant .prose-javelin p,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-assistant .prose-javelin p {
+  margin: 0.65rem 0;
+}
+
+.javelin-desktop-layout.is-chat-view .msg-assistant .prose-javelin p:first-child,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-assistant .prose-javelin p:first-child {
+  margin-top: 0;
+}
+
+.javelin-desktop-layout.is-chat-view .msg-actions,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-actions {
+  margin-top: 4px;
+}
+
+.javelin-desktop-layout.is-chat-view .msg-copy,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gpt-muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.javelin-desktop-layout.is-chat-view .msg-copy:hover,
+.javelin-browser-layout:not(.is-mobile-chat) .msg-copy:hover {
+  background: var(--gpt-surface);
+  color: var(--gpt-text);
+}
+
+.javelin-desktop-layout.is-chat-view .system-note,
+.javelin-browser-layout:not(.is-mobile-chat) .system-note {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--gpt-muted);
+  font-size: 11px;
+}
+
+.javelin-desktop-layout.is-chat-view .glass-banner,
+.javelin-browser-layout:not(.is-mobile-chat) .glass-banner {
+  border-color: var(--gpt-border);
+  background: var(--gpt-surface);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ---------- Empty state ---------- */
+
+.javelin-desktop-layout.is-chat-view .chat-hero,
+.javelin-browser-layout:not(.is-mobile-chat) .chat-hero {
+  padding: 7vh 0 0;
+}
+
+.javelin-desktop-layout.is-chat-view .chat-hero::before,
+.javelin-browser-layout:not(.is-mobile-chat) .chat-hero::before {
+  display: none;
+}
+
+.javelin-desktop-layout.is-chat-view .chat-hero-orb,
+.javelin-browser-layout:not(.is-mobile-chat) .chat-hero-orb {
+  width: 42px;
+  height: 42px;
+  margin-bottom: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--gpt-text);
+  color: var(--gpt-bg);
+  box-shadow: none;
+}
+
+.javelin-desktop-layout.is-chat-view .chat-hero-kicker,
+.javelin-browser-layout:not(.is-mobile-chat) .chat-hero-kicker {
+  color: var(--gpt-muted);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+.javelin-desktop-layout.is-chat-view .chat-hero-title,
+.javelin-browser-layout:not(.is-mobile-chat) .chat-hero-title {
+  margin-top: 8px;
+  color: var(--gpt-text);
+  font-size: clamp(28px, 3vw, 36px);
+  font-weight: 600;
+}
+
+.javelin-desktop-layout.is-chat-view .chat-hero-copy,
+.javelin-browser-layout:not(.is-mobile-chat) .chat-hero-copy {
+  max-width: 560px;
+  color: var(--gpt-muted);
+  font-size: 13px;
+}
+
+.javelin-desktop-layout.is-chat-view .chat-hero-capabilities,
+.javelin-browser-layout:not(.is-mobile-chat) .chat-hero-capabilities {
+  display: none;
+}
+
+.javelin-desktop-layout.is-chat-view .example-grid,
+.javelin-browser-layout:not(.is-mobile-chat) .example-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-width: 640px;
+  margin-top: 24px;
+}
+
+.javelin-desktop-layout.is-chat-view .example-card,
+.javelin-browser-layout:not(.is-mobile-chat) .example-card {
+  min-height: 54px;
+  padding: 12px 13px;
+  border-color: var(--gpt-border);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--gpt-text);
+  box-shadow: none;
+}
+
+.javelin-desktop-layout.is-chat-view .example-card:hover,
+.javelin-browser-layout:not(.is-mobile-chat) .example-card:hover {
+  border-color: var(--gpt-border);
+  background: var(--gpt-surface);
+}
+
+.javelin-desktop-layout.is-chat-view .example-card span,
+.javelin-browser-layout:not(.is-mobile-chat) .example-card span {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.javelin-desktop-layout.is-chat-view .example-card small,
+.javelin-browser-layout:not(.is-mobile-chat) .example-card small {
+  display: none;
+}
+
+.javelin-desktop-layout.is-chat-view .example-more,
+.javelin-browser-layout:not(.is-mobile-chat) .example-more {
+  color: var(--gpt-muted);
+}
+
+.javelin-desktop-layout.is-chat-view .glass-card,
+.javelin-browser-layout:not(.is-mobile-chat) .glass-card {
+  border-color: var(--gpt-border);
+  border-radius: 12px;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* ---------- Composer ---------- */
+
+.javelin-desktop-layout.is-chat-view .app-footer,
+.javelin-browser-layout:not(.is-mobile-chat) .app-footer {
+  border-top: 0 !important;
+  background: linear-gradient(180deg, transparent 0%, var(--gpt-bg) 28%) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.javelin-desktop-layout.is-chat-view .app-footer > div,
+.javelin-browser-layout:not(.is-mobile-chat) .app-footer > div {
+  max-width: 860px !important;
+  padding-top: 10px;
+  padding-right: 28px;
+  padding-bottom: 14px;
+  padding-left: 28px;
+}
+
+.javelin-desktop-layout.is-chat-view .composer-row,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-row {
+  align-items: flex-end;
+  gap: 7px;
+  padding: 7px 8px 7px 14px;
+  border: 1px solid var(--gpt-border);
+  border-radius: 26px;
+  background: var(--gpt-surface);
+  box-shadow: 0 4px 18px -14px rgba(0, 0, 0, 0.45);
+}
+
+.javelin-desktop-layout.is-chat-view .composer-field,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-field {
+  min-height: 42px;
+  padding: 8px 0;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--gpt-text);
+  font-size: 14px;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.javelin-desktop-layout.is-chat-view .composer-field::placeholder,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-field::placeholder {
+  color: var(--gpt-muted);
+}
+
+.javelin-desktop-layout.is-chat-view .composer-send,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-send {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--gpt-primary) !important;
+  color: var(--gpt-primary-foreground) !important;
+  box-shadow: none;
+}
+
+.javelin-desktop-layout.is-chat-view .composer-send:hover:not(:disabled),
+.javelin-browser-layout:not(.is-mobile-chat) .composer-send:hover:not(:disabled) {
+  opacity: 0.84;
+}
+
+.javelin-desktop-layout.is-chat-view .composer-send:disabled,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-send:disabled {
+  opacity: 0.35;
+}
+
+.javelin-desktop-layout.is-chat-view .composer-send svg,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-send svg {
+  margin: 0;
+}
+
+.javelin-desktop-layout.is-chat-view .composer-send-label,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-send-label {
+  display: none;
+}
+
+.javelin-desktop-layout.is-chat-view .composer-voice,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-voice {
+  gap: 5px;
+  padding-bottom: 3px;
+}
+
+.javelin-desktop-layout.is-chat-view .composer-voice button,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-voice button {
+  width: 30px;
+  height: 30px;
+  border-color: var(--gpt-border);
+  background: transparent;
+  color: var(--gpt-muted);
+}
+
+.javelin-desktop-layout.is-chat-view .composer-stop,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-stop {
+  width: 40px;
+  height: 40px;
+  border-color: var(--gpt-border);
+  background: transparent;
+  color: var(--gpt-text);
+}
+
+.javelin-desktop-layout.is-chat-view .composer-attachments,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-attachments {
+  margin-bottom: 8px;
+}
+
+.javelin-desktop-layout.is-chat-view .app-footer p,
+.javelin-browser-layout:not(.is-mobile-chat) .app-footer p {
+  color: var(--gpt-muted);
+}
+
+.javelin-desktop-layout.is-chat-view .app-footer .image-mode-chip,
+.javelin-browser-layout:not(.is-mobile-chat) .app-footer .image-mode-chip {
+  color: var(--gpt-muted);
+}
+
+/* Keep the website's phone layout exactly as it was. */
+.javelin-browser-layout.is-mobile-chat {
+  display: block;
+  height: 100vh;
+  background: var(--gpt-bg);
+  color: var(--gpt-text);
+}
+
+.javelin-browser-layout.is-mobile-chat .javelin-gpt-sidebar { display: none; }
+.javelin-browser-layout.is-mobile-chat .javelin-chat-context { display: none; }
+
+@media (max-width: 1050px) and (min-width: 821px) {
+  .javelin-browser-layout,
+  .javelin-desktop-layout.is-chat-view {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .javelin-gpt-sidebar { padding-right: 7px; padding-left: 7px; }
+  .javelin-chat-model { max-width: 150px; }
+}
+
+@media (max-width: 820px) {
+  .javelin-browser-layout {
+    display: block;
+    height: 100vh;
+  }
+
+  .javelin-browser-layout .javelin-gpt-sidebar { display: none; }
+  .javelin-browser-layout .javelin-chat-context { display: none; }
+  .javelin-browser-layout .brand-lockup { display: flex; }
+}
+
+/* ---------- Desktop code workspace chat panel ---------- */
+
+/* The workbench keeps its IDE palette; the assistant beside it uses the same
+   neutral chat surface as the main view so switching modes doesn't change the
+   feel of the conversation. */
+.javelin-desktop-layout.is-code-view .javelin-assistant-column {
+  --gpt-bg: #212121;
+  --gpt-sidebar: #171717;
+  --gpt-surface: #2f2f2f;
+  --gpt-surface-strong: #3a3a3a;
+  --gpt-text: #ececec;
+  --gpt-muted: #a8a8b3;
+  --gpt-border: #3a3a3a;
+  --gpt-user: #2f2f2f;
+  --gpt-primary: #ffffff;
+  --gpt-primary-foreground: #171717;
+  --gpt-hover: #2a2a2a;
+  --background: 0 0% 13%;
+  --foreground: 0 0% 93%;
+  --card: 0 0% 13%;
+  --card-foreground: 0 0% 93%;
+  --muted: 0 0% 18%;
+  --muted-foreground: 0 0% 67%;
+  --border: 0 0% 23%;
+  --input: 0 0% 23%;
+  --primary: 0 0% 100%;
+  --primary-foreground: 0 0% 9%;
+  --ring: 0 0% 85%;
+  border-left: 1px solid var(--gpt-border) !important;
+  background: var(--gpt-bg) !important;
+  color: var(--gpt-text);
+  color-scheme: dark;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .app-header {
+  border-bottom: 1px solid var(--gpt-border) !important;
+  background: var(--gpt-bg) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .app-header > div {
+  max-width: none !important;
+  padding-right: 16px !important;
+  padding-left: 16px !important;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .app-header .brand-tagline,
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .app-header .brand-lockup .glass-chip {
+  display: none;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .app-header h1 {
+  background: none;
+  color: var(--gpt-text);
+  -webkit-text-fill-color: currentColor;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .mode-menu {
+  justify-content: flex-start;
+  gap: 3px;
+  margin: 0;
+  padding: 3px;
+  border: 1px solid var(--gpt-border);
+  border-radius: 10px;
+  background: var(--gpt-surface);
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .mode-tab {
+  padding: 4px 9px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--gpt-muted);
+  font-size: 11px;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .mode-tab:hover:not(:disabled) {
+  border: 0;
+  background: var(--gpt-hover);
+  box-shadow: none;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .mode-tab.is-active {
+  border: 0;
+  background: var(--gpt-bg) !important;
+  color: var(--gpt-text) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .autonomy-menu { color: var(--gpt-muted); }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .autonomy-menu select {
+  border-color: var(--gpt-border);
+  background: var(--gpt-bg);
+  color: var(--gpt-text);
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column main {
+  background: var(--gpt-bg);
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column main > div {
+  max-width: none !important;
+  padding: 18px 16px 26px;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .space-y-4 > * + * {
+  margin-top: 1rem;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .message-row {
+  gap: 9px;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg-avatar {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  background: var(--gpt-text);
+  color: var(--gpt-bg);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .message-row.justify-end .msg-avatar {
+  display: none;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg {
+  border-radius: 17px;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg-assistant {
+  max-width: 100%;
+  padding: 1px 0;
+  border: 0 !important;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--gpt-text) !important;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg-user {
+  max-width: 92%;
+  padding: 8px 13px;
+  border: 0;
+  border-radius: 18px;
+  background: var(--gpt-user) !important;
+  box-shadow: none !important;
+  color: var(--gpt-text) !important;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg-user p { font-size: 0.88rem; line-height: 1.5; }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg-user a { color: var(--gpt-text); }
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg-assistant .prose-javelin {
+  color: var(--gpt-text);
+  font-size: 0.9rem;
+  line-height: 1.65;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg-assistant .prose-javelin p { margin: 0.55rem 0; }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg-assistant .prose-javelin p:first-child { margin-top: 0; }
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gpt-muted);
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .msg-copy:hover {
+  background: var(--gpt-surface);
+  color: var(--gpt-text);
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .system-note {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--gpt-muted);
+  font-size: 10px;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .glass-banner {
+  border-color: var(--gpt-border);
+  background: var(--gpt-surface);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .chat-hero { padding: 4vh 0 0; }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .chat-hero::before { display: none; }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .chat-hero-orb {
+  width: 32px;
+  height: 32px;
+  margin-bottom: 10px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--gpt-text);
+  color: var(--gpt-bg);
+  box-shadow: none;
+}
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .chat-hero-kicker { color: var(--gpt-muted); font-size: 9px; }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .chat-hero-title {
+  margin-top: 6px;
+  color: var(--gpt-text);
+  font-size: 24px;
+  font-weight: 600;
+}
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .chat-hero-copy { color: var(--gpt-muted); font-size: 12px; }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .chat-hero-capabilities { display: none; }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .example-grid {
+  grid-template-columns: 1fr;
+  max-width: none;
+  margin-top: 16px;
+}
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .example-card {
+  min-height: 44px;
+  padding: 9px 11px;
+  border-color: var(--gpt-border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--gpt-text);
+  box-shadow: none;
+}
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .example-card:hover {
+  border-color: var(--gpt-border);
+  background: var(--gpt-surface);
+}
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .example-card span { font-size: 11px; }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .example-card small { display: none; }
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .app-footer {
+  border-top: 0 !important;
+  background: linear-gradient(180deg, transparent 0%, var(--gpt-bg) 25%) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .app-footer > div {
+  max-width: none !important;
+  padding: 8px 16px 11px;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .composer-row {
+  align-items: flex-end;
+  gap: 5px;
+  padding: 5px 6px 5px 11px;
+  border: 1px solid var(--gpt-border);
+  border-radius: 22px;
+  background: var(--gpt-surface);
+  box-shadow: none;
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .composer-field {
+  min-height: 34px;
+  padding: 6px 0;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: var(--gpt-text);
+  font-size: 13px;
+}
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .composer-field::placeholder { color: var(--gpt-muted); }
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .composer-send {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--gpt-primary) !important;
+  color: var(--gpt-primary-foreground) !important;
+  box-shadow: none;
+}
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .composer-send:disabled { opacity: 0.35; }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .composer-send-label { display: none; }
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .composer-voice { gap: 4px; padding-bottom: 1px; }
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .composer-voice button {
+  width: 26px;
+  height: 26px;
+  border-color: var(--gpt-border);
+  background: transparent;
+  color: var(--gpt-muted);
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .composer-stop {
+  width: 34px;
+  height: 34px;
+  border-color: var(--gpt-border);
+  background: transparent;
+  color: var(--gpt-text);
+}
+
+.javelin-desktop-layout.is-code-view .javelin-assistant-column .app-footer p { color: var(--gpt-muted); }

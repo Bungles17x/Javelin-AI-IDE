@@ -123,6 +123,20 @@ export async function fetchAuthConfig() {
   return request('/config', { method: 'GET' })
 }
 
+/** Read the signed-in account's synced chat history. */
+export async function fetchChatHistory(token) {
+  return request('/history', { method: 'GET', token })
+}
+
+/**
+ * Upload this device's snapshot. The Worker merges it with what it already has
+ * and returns the merged history, so one request both pushes and pulls.
+ */
+export async function syncChatHistory(token, history) {
+  const payload = await request('/history', { method: 'POST', token, body: history })
+  return payload.history
+}
+
 export async function resendVerification(token) {
   return request('/verify-email/resend', { token })
 }
