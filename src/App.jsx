@@ -1195,6 +1195,13 @@ function App() {
       }
     }
     titleAttemptsRef.current.add(conversation.id)
+    // One automatic attempt per chat, even if the request fails or the page is
+    // reloaded while it is in flight. The fallback title is already usable.
+    setConversations((previous) => (Array.isArray(previous) ? previous : []).map((item) => (
+      item.id === conversation.id && item.titleSource === 'auto' && item.autoName
+        ? { ...item, autoName: false }
+        : item
+    )))
     const controller = new AbortController()
     const requestTitle = () => generateChatTitle({
       providerId,
