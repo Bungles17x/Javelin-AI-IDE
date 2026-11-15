@@ -259,6 +259,7 @@ function conversationFromMessages(messages, id = nextConversationId()) {
     id,
     title: conversationTitle(messages),
     titleSource: 'auto',
+    autoName: true,
     createdAt: now,
     updatedAt: now,
     messages,
@@ -274,6 +275,9 @@ function normalizeConversation(value) {
     id: String(value.id),
     title: String(value.title || conversationTitle(value.messages)),
     titleSource: ['manual', 'ai', 'auto'].includes(value.titleSource) ? value.titleSource : 'auto',
+    // Legacy histories already have a usable name. Only chats created by this
+    // version opt into one automatic model naming pass.
+    autoName: value.autoName === true,
     createdAt: Number.isFinite(createdAt) ? createdAt : (Number.isFinite(updatedAt) ? updatedAt : Date.now()),
     updatedAt: Number.isFinite(updatedAt) ? updatedAt : Date.now(),
     messages: value.messages.filter(Boolean),
@@ -292,12 +296,13 @@ function upsertConversation(list, id, messages) {
   const generatedName = existing && ['manual', 'ai'].includes(existing.titleSource)
   const title = generatedName ? existing.title : conversationTitle(messages)
   const titleSource = generatedName ? existing.titleSource : 'auto'
+  const autoName = generatedName ? false : existing?.autoName === true
   const sameMessages = existing && JSON.stringify(existing.messages) === JSON.stringify(messages)
-  if (existing && existing.title === title && existing.titleSource === titleSource && sameMessages) {
+  if (existing && existing.title === title && existing.titleSource === titleSource && existing.autoName === autoName && sameMessages) {
     return existingList
   }
   const snapshot = existing
-    ? { ...existing, title, titleSource, updatedAt: Date.now(), messages }
+    ? { ...existing, title, titleSource, autoName, updatedAt: Date.now(), messages }
     : conversationFromMessages(messages, id)
   return [snapshot, ...existingList.filter((conversation) => conversation.id !== id)]
     .slice(0, MAX_SAVED_CONVERSATIONS)
@@ -1175,7 +1180,7 @@ function App() {
     if (!historyReady || !activeConversationId || isBusy) return undefined
     if (provider.requiresKey && !apiKey) return undefined
     const conversation = conversations.find((item) => item.id === activeConversationId)
-    if (!conversation || conversation.titleSource !== 'auto') return undefined
+    if (!conversation || conversation.titleSource !== 'auto' || conversation.autoName !== true) return undefined
     if (titleAttemptsRef.current.has(conversation.id)) return undefined
     const hasUser = messages.some((message) => message.role === 'user' && String(message.content ?? '').trim())
     const hasAssistant = messages.some((message) => message.role === 'assistant' && String(message.content ?? '').trim())
@@ -1206,12 +1211,18 @@ function App() {
       if (!result?.title) return
       setConversations((previous) => (Array.isArray(previous) ? previous : []).map((item) => (
         item.id === conversation.id && item.titleSource === 'auto'
-          ? { ...item, title: result.title, titleSource: 'ai', updatedAt: Date.now() }
+          ? { ...item, title: result.title, titleSource: 'ai', autoName: false, updatedAt: Date.now() }
           : item
       )))
       if (result.usage) recordAccountTokens(tokensForExchange({ usage: result.usage }))
     }).catch(() => {
-      // The first-message title remains in place.
+      // The first-message title remains in place. A failed naming request did no
+      // model work, so it must not cost a guest one of their daily requests.
+      if (!isOwner && !account) {
+        setGuestUsage((previous) => previous?.date === usageDate
+          ? { ...previous, count: Math.max(0, (Number(previous.count) || 0) - 1) }
+          : previous)
+      }
     })
     return undefined
   }, [account, accountRemaining, activeConversationId, apiKey, baseUrl, conversations, enqueueProviderTask, guestUsed, historyReady, isBusy, isOwner, messages, model, provider, providerId, recordAccountTokens, setConversations, setGuestUsage, usageDate])
@@ -1329,7 +1340,7 @@ function App() {
     if (!id || !nextTitle) return
     setConversations((previous) => (Array.isArray(previous) ? previous : []).map((conversation) => (
       conversation.id === id
-        ? { ...conversation, title: nextTitle, titleSource: 'manual', updatedAt: Date.now() }
+        ? { ...conversation, title: nextTitle, titleSource: 'manual', autoName: false, updatedAt: Date.now() }
         : conversation
     )))
     // A rename is a newer revision than any deletion for this chat.
