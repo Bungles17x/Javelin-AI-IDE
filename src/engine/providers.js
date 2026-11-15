@@ -16,7 +16,7 @@
  * provider is refused before any request is made.
  */
 
-import { installId, salvageToolCallsFromText } from '../lib/providers.js'
+import { getProvider, installId, salvageToolCallsFromText } from '../lib/providers.js'
 import { LOCAL_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from './limits.js'
 
 /** Extra attempts after the first request. */
@@ -34,6 +34,10 @@ export const HOSTED_PROVIDER_IDS = new Set([
   'openrouter',
   'anthropic',
   'custom',
+  'gemini',
+  'javelincloud',
+  'javelinclouddirect',
+  'javelinhosted',
 ])
 
 const DEFAULT_ENDPOINTS = {
@@ -78,7 +82,12 @@ export function resolveTransport(provider = {}) {
     throw new Error('No model is selected. Choose a model in Settings, then run the task again.')
   }
 
-  const endpoint = stripTrailingSlash(provider.baseUrl || DEFAULT_ENDPOINTS[providerId] || '')
+  // The Agent path historically passed only {providerId, baseUrl, apiKey, model}.
+  // Merge the provider registry so a keyless hosted provider such as Javelin Cloud
+  // is not mistaken for a local Ollama endpoint just because `hosted`/`keyless`
+  // were omitted by that caller. Explicit values in `provider` still win.
+  const config = { ...getProvider(providerId), ...provider, providerId }
+  const endpoint = stripTrailingSlash(config.baseUrl || DEFAULT_ENDPOINTS[providerId] || '')
   if (!endpoint) {
     throw new Error(`Provider "${providerId}" has no endpoint. Set one in Settings.`)
   }
@@ -93,7 +102,7 @@ export function resolveTransport(provider = {}) {
   const loopback = LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())
   // A provider selected as hosted but pointed at this machine is a local model:
   // no key is required, and no credential is sent.
-  const hosted = isHostedProvider(provider) && !loopback
+  const hosted = isHostedProvider(config) && !loopback
 
   if (!hosted && !loopback) {
     throw new Error(
@@ -103,7 +112,7 @@ export function resolveTransport(provider = {}) {
   if (hosted && !loopback && parsed.protocol !== 'https:') {
     throw new Error(`Hosted model endpoints must use https: ${endpoint}`)
   }
-  if (hosted && !loopback && !provider.apiKey && !provider.keyless) {
+  if (hosted && !loopback && !config.apiKey && !config.keyless) {
     throw new Error(`Provider "${providerId}" requires an API key. Add one in Settings.`)
   }
 
@@ -113,9 +122,9 @@ export function resolveTransport(provider = {}) {
     endpoint,
     hosted,
     // A local runtime must never receive a credential.
-    apiKey: hosted && !provider.keyless ? provider.apiKey : undefined,
+    apiKey: hosted && !config.keyless ? config.apiKey : undefined,
     // Javelin Cloud counts its free allowance per install.
-    headers: hosted && provider.installHeader ? { 'x-javelin-install': installId() } : undefined,
+    headers: hosted && config.installHeader ? { 'x-javelin-install': installId() } : undefined,
     url: `${endpoint}/chat/completions`,
   }
 }
