@@ -238,7 +238,8 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   const [previewMarkdown, setPreviewMarkdown] = useState(false)
   const [fontSize, setFontSize] = useState(() => {
     try {
-      const stored = Number(localStorage.getItem('javelin.editorFontSize'))
+      const raw = localStorage.getItem('javelin.editorFontSize')
+      const stored = raw === null ? NaN : Number(raw)
       return Number.isFinite(stored)
         ? Math.min(EDITOR_FONT_MAX, Math.max(EDITOR_FONT_MIN, stored))
         : EDITOR_FONT_DEFAULT
