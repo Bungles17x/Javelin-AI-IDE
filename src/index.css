@@ -179,6 +179,22 @@
 .workbench-editor-area { position: relative; display: grid; min-width: 0; min-height: 0; grid-template-rows: 36px 27px minmax(0, 1fr) 22px; background: #111412; }
 .workbench-editor-area { grid-column: 3; grid-row: 2; }
 .workbench-editor-area.has-console { grid-template-rows: 36px 27px minmax(120px, 1fr) 230px 22px; }
+.workbench-editor-area.is-split { grid-template-rows: 36px minmax(0, 1fr) 22px; }
+.workbench-editor-area.is-split.has-console { grid-template-rows: 36px minmax(120px, 1fr) 230px 22px; }
+.editor-split { display: grid; min-width: 0; min-height: 0; grid-template-columns: minmax(0, 1fr); }
+.editor-split.is-split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.editor-pane { display: grid; min-width: 0; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+.editor-split.is-split .editor-pane { grid-template-rows: 27px minmax(0, 1fr); }
+.editor-pane.is-secondary { border-left: 1px solid var(--ide-border); }
+.editor-pane-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 0 5px 0 10px; border-bottom: 1px solid #202721; background: #131814; color: #94a197; font: 10px 'Cascadia Code', Consolas, monospace; }
+.editor-pane-title { display: flex; min-width: 0; align-items: center; gap: 6px; overflow: hidden; }
+.editor-pane-title > span:not(.editor-dirty-dot):not(.file-type-icon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-pane-actions { display: flex; flex: 0 0 auto; align-items: center; }
+.editor-pane-actions .workbench-icon-button { width: 24px; height: 24px; }
+.editor-markdown-preview { min-width: 0; min-height: 0; overflow: auto; padding: 20px 24px; background: #111412; color: #dfe7e0; }
+.editor-markdown-preview .prose-javelin { max-width: 900px; margin: 0 auto; color: #dfe7e0; }
+.editor-markdown-preview .prose-javelin a { color: var(--ide-accent); }
+.editor-markdown-preview .prose-javelin code { color: #d3ef74; }
 .editor-breadcrumbs { display: flex; min-width: 0; align-items: center; gap: 1px; overflow-x: auto; padding: 0 12px; border-bottom: 1px solid #202721; background: #131814; color: #94a197; font: 10px 'Cascadia Code', Consolas, monospace; white-space: nowrap; }
 .editor-crumb-item { display: inline-flex; align-items: center; gap: 1px; }
 .editor-crumb { display: inline-flex; align-items: center; gap: 4px; max-width: 240px; overflow: hidden; padding: 2px 4px; border: 0; border-radius: 4px; background: transparent; color: #aebbb1; font: inherit; text-overflow: ellipsis; white-space: nowrap; }
@@ -191,6 +207,7 @@ button.editor-crumb:hover { background: rgba(255, 255, 255, .08); color: var(--i
 .editor-tabs-list { display: flex; min-width: 0; height: 100%; flex: 1; overflow-x: auto; }
 .editor-tab-wrap { display: flex; min-width: 0; max-width: 240px; height: 100%; flex: 0 0 auto; align-items: center; border-right: 1px solid var(--ide-border); background: #171b18; color: #aab4ab; }
 .editor-tab-wrap.is-active { background: #111412; color: #e2e9e2; box-shadow: inset 0 1px var(--ide-accent); }
+.editor-tab-wrap.is-secondary:not(.is-active) { box-shadow: inset 0 -1px rgba(211, 239, 116, .42); }
 .editor-tab { display: flex; min-width: 0; height: 100%; flex: 1; align-items: center; gap: 8px; padding: 0 8px 0 12px; border: 0; background: transparent; color: inherit; font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
 .editor-tab span:not(.editor-dirty-dot):not(.file-type-icon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .editor-tab .file-type-icon { align-self: center; }
@@ -217,6 +234,12 @@ button.editor-crumb:hover { background: rgba(255, 255, 255, .08); color: var(--i
 .welcome-shortcuts kbd { padding: 2px 4px; border: 1px solid #303a32; border-radius: 3px; background: #171d18; color: #94a299; font: 9px 'Cascadia Code', Consolas, monospace; }
 .editor-statusbar { display: flex; align-items: center; justify-content: space-between; overflow: hidden; padding: 0 8px; background: #25301f; color: #d3dfb2; font-size: 9px; white-space: nowrap; }
 .editor-statusbar span { overflow: hidden; text-overflow: ellipsis; }
+.editor-status-tools { display: flex; min-width: 0; align-items: center; gap: 12px; }
+.editor-status-tools > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.editor-font-controls { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 3px; }
+.editor-font-controls button { display: inline-grid; width: 16px; height: 15px; place-items: center; padding: 0; border: 0; border-radius: 3px; background: rgba(0, 0, 0, .16); color: #d3dfb2; font: 11px/1 'Cascadia Code', Consolas, monospace; cursor: pointer; }
+.editor-font-controls button:hover { background: rgba(0, 0, 0, .3); color: #f1f7d8; }
+.editor-font-controls > span { min-width: 25px; text-align: center; }
 .workbench-error { position: absolute; z-index: 2; right: 12px; bottom: 34px; left: 12px; padding: 8px 10px; border: 1px solid #8e4545; border-radius: 4px; background: #3a2020; color: #ffcaca; font-size: 11px; }
 .workbench-console { display: grid; min-height: 0; grid-template-rows: 31px minmax(0, 1fr) 34px; border-top: 1px solid var(--ide-border); background: #121613; }
 .agent-phase-panel { display: grid; gap: 9px; padding: 10px 12px; border: 1px solid hsl(var(--border)); border-radius: 6px; background: color-mix(in srgb, hsl(var(--card)) 82%, #93a65d 18%); font-size: 11px; }

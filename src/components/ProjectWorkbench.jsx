@@ -1,10 +1,14 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, ChevronsDownUp, ChevronsUpDown, Copy, FilePlus2, Files, FolderOpen, FolderPlus, GitBranch, PanelLeftClose, PanelLeftOpen, Pencil, Play, Save, Search, Settings, Sparkles, Square, Terminal, Trash2, WrapText, X } from 'lucide-react'
+import { Bot, ChevronsDownUp, ChevronsUpDown, Columns2, Copy, Eye, EyeOff, FilePlus2, Files, FolderOpen, FolderPlus, GitBranch, Minus, PanelLeftClose, PanelLeftOpen, Pencil, Play, Plus, RotateCcw, Save, Search, Settings, Sparkles, Square, Terminal, Trash2, WrapText, X } from 'lucide-react'
 import FileTypeIcon from './FileTypeIcon.jsx'
+import { Markdown } from './Markdown.jsx'
 
 const EXPLORER_MIN_WIDTH = 180
 const EXPLORER_MAX_WIDTH = 360
 const EXPLORER_DEFAULT_WIDTH = 220
+const EDITOR_FONT_MIN = 10
+const EDITOR_FONT_MAX = 22
+const EDITOR_FONT_DEFAULT = 13
 
 const MonacoEditor = lazy(async () => {
   const module = await import('@monaco-editor/react')
@@ -230,6 +234,18 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   })
   const [wordWrap, setWordWrap] = useState(false)
   const [cursor, setCursor] = useState({ line: 1, column: 1 })
+  const [secondaryFile, setSecondaryFile] = useState('')
+  const [previewMarkdown, setPreviewMarkdown] = useState(false)
+  const [fontSize, setFontSize] = useState(() => {
+    try {
+      const stored = Number(localStorage.getItem('javelin.editorFontSize'))
+      return Number.isFinite(stored)
+        ? Math.min(EDITOR_FONT_MAX, Math.max(EDITOR_FONT_MIN, stored))
+        : EDITOR_FONT_DEFAULT
+    } catch {
+      return EDITOR_FONT_DEFAULT
+    }
+  })
   const [gitStatus, setGitStatus] = useState(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [paletteQuery, setPaletteQuery] = useState('')
@@ -246,11 +262,23 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   const [matchCase, setMatchCase] = useState(false)
   const [searchingContents, setSearchingContents] = useState(false)
   const [searchResults, setSearchResults] = useState([])
+  const [commandHistory, setCommandHistory] = useState(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('javelin.commandHistory') || '[]')
+      return Array.isArray(stored) ? stored.filter((entry) => typeof entry === 'string').slice(0, 40) : []
+    } catch {
+      return []
+    }
+  })
+  const [historyIndex, setHistoryIndex] = useState(-1)
   const searchInputRef = useRef(null)
   const paletteInputRef = useRef(null)
   const editorRef = useRef(null)
+  const secondaryEditorRef = useRef(null)
   const pendingRevealRef = useRef(null)
   const contextMenuRef = useRef(null)
+  const consoleAbortRef = useRef(null)
+  const historyDraftRef = useRef('')
 
   const filteredFiles = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -260,6 +288,13 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   const dirty = Boolean(activeFile) && draft !== savedContent
   const extension = activeFile.split('.').pop()?.toLowerCase()
   const language = LANGUAGE_BY_EXTENSION[extension] || 'plaintext'
+  const secondaryExtension = secondaryFile.split('.').pop()?.toLowerCase()
+  const secondaryLanguage = LANGUAGE_BY_EXTENSION[secondaryExtension] || 'plaintext'
+  const secondaryDraft = fileDrafts[secondaryFile] ?? ''
+  const secondarySaved = savedContents[secondaryFile] ?? ''
+  const secondaryDirty = Boolean(secondaryFile) && secondaryDraft !== secondarySaved
+  const splitOpen = Boolean(secondaryFile)
+  const markdownActive = extension === 'md' || extension === 'mdx'
   const allDirectories = useMemo(() => [...new Set(projectDirectories)].sort(), [projectDirectories])
 
   function rememberRecent(path) {
@@ -307,6 +342,18 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   useEffect(() => {
     try { localStorage.setItem('javelin.explorerCollapsed', String(explorerCollapsed)) } catch { /* storage can be unavailable */ }
   }, [explorerCollapsed])
+
+  useEffect(() => {
+    try { localStorage.setItem('javelin.editorFontSize', String(fontSize)) } catch { /* storage can be unavailable */ }
+  }, [fontSize])
+
+  useEffect(() => {
+    try { localStorage.setItem('javelin.commandHistory', JSON.stringify(commandHistory)) } catch { /* storage can be unavailable */ }
+  }, [commandHistory])
+
+  useEffect(() => {
+    setPreviewMarkdown(false)
+  }, [activeFile])
 
   useEffect(() => {
     const handleExplorerShortcuts = (event) => {
@@ -432,7 +479,13 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
         event.preventDefault()
         const index = Math.max(0, openFiles.indexOf(activeFile))
         const step = event.shiftKey ? -1 : 1
-        setActiveFile(openFiles[(index + step + openFiles.length) % openFiles.length])
+        activateFile(openFiles[(index + step + openFiles.length) % openFiles.length])
+        return
+      }
+      if (command && event.key === '\\') {
+        event.preventDefault()
+        if (secondaryFile) closeSplit()
+        else void openInSplit()
         return
       }
       const editingField = event.target instanceof Element && event.target.closest('input, textarea, [contenteditable="true"]')
@@ -448,7 +501,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     }
     window.addEventListener('keydown', handleSaveShortcut)
     return () => window.removeEventListener('keydown', handleSaveShortcut)
-  }, [paletteOpen, activeFile, openFiles, fileDrafts, savedContents, draft, dirty, busy, activityView])
+  }, [paletteOpen, activeFile, openFiles, fileDrafts, savedContents, draft, dirty, busy, activityView, secondaryFile, project])
 
   useEffect(() => {
     if (paletteOpen) paletteInputRef.current?.focus()
@@ -458,10 +511,19 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     setPaletteIndex(0)
   }, [paletteQuery, paletteOpen])
 
-  const saveFile = async () => {
-    if (!activeFile || !dirty || busy) return
-    const path = activeFile
-    const content = draft
+  /** Keep one shared file activation path so tabs, the explorer and splits all
+   *  swap rather than opening the same file in both panes. */
+  function activateFile(path) {
+    if (!path || path === activeFile) return
+    if (secondaryFile === path) setSecondaryFile(activeFile || '')
+    setActiveFile(path)
+    rememberRecent(path)
+  }
+
+  const savePath = async (path) => {
+    if (!path || busy) return
+    const content = fileDrafts[path] ?? contents[path] ?? ''
+    if (content === (savedContents[path] ?? '')) return
     setBusy(true)
     setError('')
     try {
@@ -474,21 +536,21 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     }
   }
 
+  const saveFile = async () => savePath(activeFile)
+
   const selectFile = async (relativePath) => {
-    if (relativePath === activeFile) return
+    if (relativePath === activeFile) return true
     setError('')
     if (openFiles.includes(relativePath)) {
-      setActiveFile(relativePath)
-      rememberRecent(relativePath)
-      return
+      activateFile(relativePath)
+      return true
     }
     if (typeof contents[relativePath] === 'string') {
       setOpenFiles((previous) => [...previous, relativePath])
       setFileDrafts((previous) => ({ ...previous, [relativePath]: contents[relativePath] }))
       setSavedContents((previous) => ({ ...previous, [relativePath]: contents[relativePath] }))
-      setActiveFile(relativePath)
-      rememberRecent(relativePath)
-      return
+      activateFile(relativePath)
+      return true
     }
     setBusy(true)
     try {
@@ -496,14 +558,52 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
       setOpenFiles((previous) => previous.includes(relativePath) ? previous : [...previous, relativePath])
       setFileDrafts((previous) => ({ ...previous, [relativePath]: content }))
       setSavedContents((previous) => ({ ...previous, [relativePath]: content }))
-      setActiveFile(relativePath)
-      rememberRecent(relativePath)
+      activateFile(relativePath)
+      return true
     } catch (readError) {
       pendingRevealRef.current = null
       setError(readError.message || String(readError))
+      return false
     } finally {
       setBusy(false)
     }
+  }
+
+  /** Open a second editor pane without disturbing the file in the primary pane. */
+  async function openInSplit(targetPath) {
+    if (!project) {
+      setError('Open a project folder first.')
+      return
+    }
+    if (!activeFile) {
+      if (targetPath) await selectFile(targetPath)
+      else setError('Open a file first, then open another one to the side.')
+      return
+    }
+    let target = targetPath || activeFile
+    if (target === activeFile) {
+      target = openFiles.find((path) => path !== activeFile)
+        ?? Object.keys(contents).find((path) => path !== activeFile)
+      if (!target) {
+        setError('Open a second file before splitting the editor.')
+        return
+      }
+    }
+    if (secondaryDirty && secondaryFile && target !== secondaryFile &&
+      !window.confirm(`Discard unsaved changes in ${secondaryFile} and replace the split pane?`)) return
+    const primary = activeFile
+    const loaded = await selectFile(target)
+    if (!loaded) return
+    setActiveFile(primary)
+    setSecondaryFile(target)
+    rememberRecent(target)
+    setTimeout(() => secondaryEditorRef.current?.focus?.(), 80)
+  }
+
+  function closeSplit() {
+    if (secondaryDirty && !window.confirm(`Discard unsaved changes in ${secondaryFile}?`)) return
+    setSecondaryFile('')
+    requestAnimationFrame(() => editorRef.current?.focus?.())
   }
 
   const openFileAt = async (relativePath, line = 1, column = 1) => {
@@ -541,6 +641,8 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     if (changed.length && !window.confirm(`Close ${openFiles.length} file(s) and discard unsaved changes in ${changed.length}?`)) return
     setOpenFiles([])
     setActiveFile('')
+    setSecondaryFile('')
+    setPreviewMarkdown(false)
     setFileDrafts({})
     setSavedContents({})
   }
@@ -552,6 +654,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     const nextFiles = openFiles.filter((file) => file !== path)
     setOpenFiles(nextFiles)
     if (activeFile === path) setActiveFile(nextFiles[Math.min(index, nextFiles.length - 1)] ?? '')
+    if (secondaryFile === path || activeFile === path) setSecondaryFile('')
     setFileDrafts((previous) => {
       const next = { ...previous }
       delete next[path]
@@ -595,6 +698,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
         return next
       })
       setActiveFile((current) => current === targetPath ? normalizedPath : current)
+      setSecondaryFile((current) => current === targetPath ? normalizedPath : current)
       rememberRecent(normalizedPath)
     } catch (renameError) {
       setError(renameError.message || String(renameError))
@@ -657,6 +761,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
       await onDeleteFile(path)
       setOpenFiles(nextFiles)
       if (activeFile === path) setActiveFile(nextFiles[Math.min(index, nextFiles.length - 1)] ?? '')
+      if (secondaryFile === path || activeFile === path) setSecondaryFile('')
       setFileDrafts((previous) => {
         const next = { ...previous }
         delete next[path]
@@ -765,6 +870,8 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
       setFileDrafts(initialContents)
       setSavedContents(initialContents)
       setActiveFile(firstTextFile?.path ?? '')
+      setSecondaryFile('')
+      setPreviewMarkdown(false)
       const autoExpanded = new Set((opened.directories ?? []).filter((path) => !path.includes('/')))
       if (firstTextFile?.path) {
         const parts = firstTextFile.path.split('/')
@@ -785,19 +892,54 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     const command = consoleInput.trim()
     if (!command || !project || consoleBusy) return
     setConsoleInput('')
+    setHistoryIndex(-1)
+    setCommandHistory((previous) => [command, ...previous.filter((entry) => entry !== command)].slice(0, 40))
     setConsoleBusy(true)
     setConsoleLines((previous) => [...previous, { type: 'command', text: `> ${command}` }])
+    const controller = new AbortController()
+    consoleAbortRef.current = controller
     try {
-      const result = await onRunCommand(command)
+      const result = await onRunCommand(command, controller.signal)
+      if (controller.signal.aborted) {
+        setConsoleLines((previous) => [...previous, { type: 'error', text: 'Command canceled.' }].slice(-50))
+        return
+      }
       const output = [result.stdout, result.stderr].filter(Boolean).join('\n')
       setConsoleLines((previous) => [...previous, {
         type: result.exitCode === 0 ? 'success' : 'error',
         text: `${output || '(no output)'}\nexit code: ${result.exitCode}`,
       }].slice(-50))
     } catch (commandError) {
-      setConsoleLines((previous) => [...previous, { type: 'error', text: commandError.message || String(commandError) }].slice(-50))
+      setConsoleLines((previous) => [...previous, {
+        type: 'error',
+        text: controller.signal.aborted ? 'Command canceled.' : commandError.message || String(commandError),
+      }].slice(-50))
     } finally {
+      if (consoleAbortRef.current === controller) consoleAbortRef.current = null
       setConsoleBusy(false)
+    }
+  }
+
+  const cancelConsoleCommand = () => consoleAbortRef.current?.abort()
+
+  const handleConsoleHistory = (event) => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+    if (!commandHistory.length) return
+    event.preventDefault()
+    if (event.key === 'ArrowUp') {
+      if (historyIndex === -1) historyDraftRef.current = consoleInput
+      const next = Math.min(commandHistory.length - 1, historyIndex + 1)
+      setHistoryIndex(next)
+      setConsoleInput(commandHistory[next])
+      return
+    }
+    const next = historyIndex - 1
+    if (next < 0) {
+      setHistoryIndex(-1)
+      setConsoleInput(historyDraftRef.current)
+    } else {
+      setHistoryIndex(next)
+      setConsoleInput(commandHistory[next])
     }
   }
 
@@ -852,11 +994,22 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
       const line = Number(window.prompt('Go to line number', String(cursor.line)))
       if (Number.isFinite(line) && line > 0) revealAt(line)
     } },
+    { label: 'Open Active File to the Side', icon: Columns2, action: () => void openInSplit(activeFile) },
+    { label: secondaryFile ? 'Close Split Editor' : 'Split Editor', icon: Columns2, action: () => secondaryFile ? closeSplit() : void openInSplit() },
+    ...(markdownActive ? [{
+      label: previewMarkdown ? 'Show Markdown Source' : 'Preview Markdown',
+      icon: previewMarkdown ? EyeOff : Eye,
+      action: () => setPreviewMarkdown((value) => !value),
+    }] : []),
     { label: 'Toggle Word Wrap', icon: WrapText, action: () => setWordWrap((on) => !on) },
+    { label: 'Increase Editor Font Size', icon: Plus, action: () => setFontSize((size) => Math.min(EDITOR_FONT_MAX, size + 1)) },
+    { label: 'Decrease Editor Font Size', icon: Minus, action: () => setFontSize((size) => Math.max(EDITOR_FONT_MIN, size - 1)) },
+    { label: 'Reset Editor Font Size', icon: RotateCcw, action: () => setFontSize(EDITOR_FONT_DEFAULT) },
     { label: 'Toggle Explorer Sidebar', icon: PanelLeftClose, action: () => setExplorerCollapsed((collapsed) => !collapsed) },
     { label: 'Expand All Folders', icon: ChevronsUpDown, action: () => setExpanded(new Set(allDirectories)) },
     { label: 'Collapse All Folders', icon: ChevronsDownUp, action: () => setExpanded(new Set()) },
     { label: 'Toggle Terminal Panel', icon: Terminal, action: () => setConsoleOpen((open) => !open) },
+    { label: 'Clear Terminal Output', icon: Trash2, action: () => setConsoleLines([]) },
     { label: 'Focus Javelin Assistant', icon: Bot, action: () => window.dispatchEvent(new Event('javelin:focus-assistant')) },
     { label: 'Open Javelin Settings', icon: Settings, action: () => window.dispatchEvent(new Event('javelin:open-settings')) },
     { label: 'Run Project Tests', icon: Play, action: () => {
@@ -901,6 +1054,54 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     window.addEventListener('pointerup', stop)
     window.addEventListener('pointercancel', stop)
     document.body.classList.add('is-resizing')
+  }
+
+  const editorOptions = {
+    automaticLayout: true,
+    fontFamily: 'Cascadia Code, Consolas, monospace',
+    fontSize,
+    fontLigatures: true,
+    lineHeight: Math.round(fontSize * 1.55),
+    minimap: { enabled: false },
+    padding: { top: 14 },
+    scrollBeyondLastLine: false,
+    smoothScrolling: true,
+    cursorSmoothCaretAnimation: 'on',
+    cursorBlinking: 'smooth',
+    renderLineHighlight: 'all',
+    roundedSelection: true,
+    tabSize: 2,
+    detectIndentation: true,
+    wordWrap: wordWrap ? 'on' : 'off',
+    // Autocomplete: word suggestions, snippets and trigger characters, so
+    // typed prefixes produce completions without extra keystrokes.
+    quickSuggestions: { other: true, comments: false, strings: false },
+    quickSuggestionsDelay: 60,
+    suggestOnTriggerCharacters: true,
+    acceptSuggestionOnEnter: 'on',
+    tabCompletion: 'on',
+    wordBasedSuggestions: 'currentDocument',
+    suggest: { showWords: true, preview: true, insertMode: 'replace', snippetsPreventQuickSuggestions: false },
+    snippetSuggestions: 'inline',
+    parameterHints: { enabled: true },
+    inlineSuggest: { enabled: true },
+    // Colour coding beyond tokens: brackets get their own colours and guides.
+    bracketPairColorization: { enabled: true, independentColorPoolPerBracketType: true },
+    guides: { indentation: true, bracketPairs: true, highlightActiveIndentation: true, bracketPairsHorizontal: 'active' },
+    occurrencesHighlight: 'singleFile',
+    selectionHighlight: true,
+    autoClosingBrackets: 'always',
+    autoClosingQuotes: 'always',
+    autoClosingOvertype: 'always',
+    autoIndent: 'full',
+    linkedEditing: true,
+    multiCursorModifier: 'ctrlCmd',
+    stickyScroll: { enabled: true, maxLineCount: 4 },
+    breadcrumbs: { enabled: true, showSymbols: true },
+    folding: true,
+    showFoldingControls: 'mouseover',
+    unicodeHighlight: { ambiguousCharacters: false },
+    scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
   }
 
   return (
@@ -1074,12 +1275,12 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
         }}
       />}
 
-      <main className={`workbench-editor-area ${consoleOpen ? 'has-console' : ''}`}>
+      <main className={`workbench-editor-area${consoleOpen ? ' has-console' : ''}${splitOpen ? ' is-split' : ''}`}>
         <div className="editor-tabs">
           <div className="editor-tabs-list" role="tablist" aria-label="Open files">
             {openFiles.length ? openFiles.map((path) => (
               <div
-                className={`editor-tab-wrap ${path === activeFile ? 'is-active' : ''}`}
+                className={`editor-tab-wrap ${path === activeFile ? 'is-active' : ''}${path === secondaryFile ? ' is-secondary' : ''}`}
                 key={path}
                 onAuxClick={(event) => {
                   if (event.button !== 1) return
@@ -1093,7 +1294,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
                   role="tab"
                   aria-selected={path === activeFile}
                   title={path}
-                  onClick={() => { setActiveFile(path); rememberRecent(path) }}
+                  onClick={() => activateFile(path)}
                 >
                   <FileTypeIcon name={path} />
                   <span>{path.split('/').pop()}</span>
@@ -1108,6 +1309,18 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
             )}
           </div>
           <div className="editor-actions">
+            {markdownActive && (
+              <IconButton title={previewMarkdown ? 'Show Markdown source' : 'Preview Markdown'} onClick={() => setPreviewMarkdown((value) => !value)}>
+                {previewMarkdown ? <EyeOff size={15} /> : <Eye size={15} />}
+              </IconButton>
+            )}
+            <IconButton
+              title={splitOpen ? 'Close split editor (Ctrl+\\)' : 'Split editor (Ctrl+\\)'}
+              disabled={!activeFile}
+              onClick={() => splitOpen ? closeSplit() : void openInSplit()}
+            >
+              <Columns2 size={15} />
+            </IconButton>
             <IconButton title={wordWrap ? 'Turn word wrap off' : 'Turn word wrap on'} onClick={() => setWordWrap((on) => !on)}><WrapText size={15} /></IconButton>
             <IconButton title={consoleOpen ? 'Hide terminal' : 'Show terminal'} onClick={() => setConsoleOpen((open) => !open)}><Terminal size={15} /></IconButton>
             <IconButton title="Save file (Ctrl+S)" disabled={!dirty || busy} onClick={() => void saveFile()}><Save size={15} /></IconButton>
@@ -1115,23 +1328,44 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
             <IconButton title="Delete active file" disabled={!activeFile || busy} onClick={() => void deleteActiveFile()}><Trash2 size={14} /></IconButton>
           </div>
         </div>
-        <nav className="editor-breadcrumbs" aria-label="Active file path">
-          {activeFile ? activeFile.split('/').map((part, index, parts) => {
-            const path = parts.slice(0, index + 1).join('/')
-            const last = index === parts.length - 1
-            return (
-              <span className="editor-crumb-item" key={path}>
-                {index > 0 && <span className="editor-crumb-separator">/</span>}
-                {last ? (
-                  <span className="editor-crumb is-file"><FileTypeIcon name={part} size={12} /> {part}</span>
-                ) : (
-                  <button className="editor-crumb" type="button" title={`Show ${path} in Explorer`} onClick={() => revealFolder(path)}>{part}</button>
-                )}
-              </span>
-            )
-          }) : <span className="editor-crumb-placeholder">No file open</span>}
-        </nav>
+        {!splitOpen && (
+          <nav className="editor-breadcrumbs" aria-label="Active file path">
+            {activeFile ? activeFile.split('/').map((part, index, parts) => {
+              const path = parts.slice(0, index + 1).join('/')
+              const last = index === parts.length - 1
+              return (
+                <span className="editor-crumb-item" key={path}>
+                  {index > 0 && <span className="editor-crumb-separator">/</span>}
+                  {last ? (
+                    <span className="editor-crumb is-file"><FileTypeIcon name={part} size={12} /> {part}</span>
+                  ) : (
+                    <button className="editor-crumb" type="button" title={`Show ${path} in Explorer`} onClick={() => revealFolder(path)}>{part}</button>
+                  )}
+                </span>
+              )
+            }) : <span className="editor-crumb-placeholder">No file open</span>}
+          </nav>
+        )}
+        <div className={`editor-split${splitOpen ? ' is-split' : ''}`}>
+          <section className="editor-pane is-primary">
+            {splitOpen && (
+              <div className="editor-pane-header">
+                <span className="editor-pane-title">
+                  <FileTypeIcon name={activeFile} size={12} />
+                  <span>{activeFile}</span>
+                  {dirty && <span className="editor-dirty-dot" aria-label="Unsaved changes" />}
+                </span>
+                <div className="editor-pane-actions">
+                  <IconButton title="Save file (Ctrl+S)" disabled={!dirty || busy} onClick={() => void saveFile()}><Save size={14} /></IconButton>
+                </div>
+              </div>
+            )}
         {activeFile ? (
+          markdownActive && previewMarkdown ? (
+            <div className="editor-markdown-preview">
+              <Markdown>{draft}</Markdown>
+            </div>
+          ) : (
           <Suspense fallback={<div className="editor-loading">Loading editor…</div>}>
             <MonacoEditor
               height="100%"
@@ -1152,55 +1386,10 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
                   revealAt(reveal.line, reveal.column)
                 }
               }}
-              options={{
-                automaticLayout: true,
-                fontFamily: 'Cascadia Code, Consolas, monospace',
-                fontSize: 13,
-                fontLigatures: true,
-                lineHeight: 20,
-                minimap: { enabled: false },
-                padding: { top: 14 },
-                scrollBeyondLastLine: false,
-                smoothScrolling: true,
-                cursorSmoothCaretAnimation: 'on',
-                cursorBlinking: 'smooth',
-                renderLineHighlight: 'all',
-                roundedSelection: true,
-                tabSize: 2,
-                detectIndentation: true,
-                wordWrap: wordWrap ? 'on' : 'off',
-                // Autocomplete: word suggestions, snippets and trigger characters, so
-                // typed prefixes produce completions without extra keystrokes.
-                quickSuggestions: { other: true, comments: false, strings: false },
-                quickSuggestionsDelay: 60,
-                suggestOnTriggerCharacters: true,
-                acceptSuggestionOnEnter: 'on',
-                tabCompletion: 'on',
-                wordBasedSuggestions: 'currentDocument',
-                suggest: { showWords: true, preview: true, insertMode: 'replace', snippetsPreventQuickSuggestions: false },
-                snippetSuggestions: 'inline',
-                parameterHints: { enabled: true },
-                inlineSuggest: { enabled: true },
-                // Colour coding beyond tokens: brackets get their own colours and guides.
-                bracketPairColorization: { enabled: true, independentColorPoolPerBracketType: true },
-                guides: { indentation: true, bracketPairs: true, highlightActiveIndentation: true, bracketPairsHorizontal: 'active' },
-                occurrencesHighlight: 'singleFile',
-                selectionHighlight: true,
-                autoClosingBrackets: 'always',
-                autoClosingQuotes: 'always',
-                autoClosingOvertype: 'always',
-                autoIndent: 'full',
-                linkedEditing: true,
-                multiCursorModifier: 'ctrlCmd',
-                stickyScroll: { enabled: true, maxLineCount: 4 },
-                breadcrumbs: { enabled: true, showSymbols: true },
-                folding: true,
-                showFoldingControls: 'mouseover',
-                unicodeHighlight: { ambiguousCharacters: false },
-                scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
-              }}
+              options={editorOptions}
             />
           </Suspense>
+          )
         ) : (
           <div className="editor-welcome">
             <span className="welcome-mark">J</span>
@@ -1216,10 +1405,41 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
               <span><kbd>Ctrl P</kbd> Quick open</span>
               <span><kbd>Ctrl ⇧ P</kbd> Commands</span>
               <span><kbd>Ctrl ⇧ F</kbd> Search in files</span>
+              <span><kbd>Ctrl \</kbd> Split editor</span>
               <span><kbd>F2</kbd> Rename file</span>
             </div>
           </div>
         )}
+          </section>
+          {splitOpen && (
+            <section className="editor-pane is-secondary">
+              <div className="editor-pane-header">
+                <span className="editor-pane-title">
+                  <FileTypeIcon name={secondaryFile} size={12} />
+                  <span>{secondaryFile}</span>
+                  {secondaryDirty && <span className="editor-dirty-dot" aria-label="Unsaved changes" />}
+                </span>
+                <div className="editor-pane-actions">
+                  <IconButton title="Save split file" disabled={!secondaryDirty || busy} onClick={() => void savePath(secondaryFile)}><Save size={14} /></IconButton>
+                  <IconButton title="Close split editor (Ctrl+\\)" onClick={closeSplit}><X size={14} /></IconButton>
+                </div>
+              </div>
+              <Suspense fallback={<div className="editor-loading">Loading editor…</div>}>
+                <MonacoEditor
+                  height="100%"
+                  path={secondaryFile}
+                  language={secondaryLanguage}
+                  value={secondaryDraft}
+                  onChange={(value) => setFileDrafts((previous) => ({ ...previous, [secondaryFile]: value ?? '' }))}
+                  theme="javelin-dark"
+                  beforeMount={defineJavelinTheme}
+                  onMount={(editor) => { secondaryEditorRef.current = editor }}
+                  options={editorOptions}
+                />
+              </Suspense>
+            </section>
+          )}
+        </div>
         {consoleOpen && (
           <section className="workbench-console" aria-label="Build and terminal output">
             <header className="console-heading">
@@ -1235,22 +1455,37 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
               <span aria-hidden="true">&gt;</span>
               <input
                 value={consoleInput}
-                onChange={(event) => setConsoleInput(event.target.value)}
+                onChange={(event) => { setConsoleInput(event.target.value); setHistoryIndex(-1) }}
+                onKeyDown={handleConsoleHistory}
                 placeholder={project ? 'Run a command in the project folder' : 'Open a project folder first'}
+                title="Use ↑ and ↓ to recall previous commands"
                 aria-label="Project terminal command"
                 disabled={!project || consoleBusy}
                 autoComplete="off"
               />
-              <button type="submit" title="Run command" aria-label="Run command" disabled={!project || consoleBusy || !consoleInput.trim()}>
-                {consoleBusy ? <Square size={13} /> : <Play size={13} />}
-              </button>
+              {consoleBusy ? (
+                <button type="button" title="Cancel command" aria-label="Cancel command" onClick={cancelConsoleCommand}>
+                  <Square size={13} />
+                </button>
+              ) : (
+                <button type="submit" title="Run command" aria-label="Run command" disabled={!project || !consoleInput.trim()}>
+                  <Play size={13} />
+                </button>
+              )}
             </form>
           </section>
         )}
         {error && <div className="workbench-error" role="alert">{error}</div>}
         <footer className="editor-statusbar">
           <span>{project?.root || 'JAVELIN DESKTOP'}</span>
-          <span>{activeFile ? `Ln ${cursor.line}, Col ${cursor.column} · ${language}` : 'Ready'}{dirty ? ' · Unsaved' : ''}</span>
+          <div className="editor-status-tools">
+            <span>{activeFile ? `Ln ${cursor.line}, Col ${cursor.column} · ${language}` : 'Ready'}{dirty ? ' · Unsaved' : ''}{splitOpen ? ' · split' : ''}</span>
+            <span className="editor-font-controls" aria-label="Editor font size">
+              <button type="button" title="Decrease editor font size" aria-label="Decrease editor font size" onClick={() => setFontSize((size) => Math.max(EDITOR_FONT_MIN, size - 1))}>−</button>
+              <span>{fontSize}px</span>
+              <button type="button" title="Increase editor font size" aria-label="Increase editor font size" onClick={() => setFontSize((size) => Math.min(EDITOR_FONT_MAX, size + 1))}>+</button>
+            </span>
+          </div>
         </footer>
       </main>
       {contextMenu && (
@@ -1264,6 +1499,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
         >
           <div className="file-context-heading" title={contextMenu.path}>{contextMenu.path}</div>
           <button type="button" role="menuitem" onClick={() => { setContextMenu(null); void selectFile(contextMenu.path) }}><FolderOpen size={13} /> Open</button>
+          <button type="button" role="menuitem" onClick={() => { setContextMenu(null); void openInSplit(contextMenu.path) }}><Columns2 size={13} /> Open to the side</button>
           <button type="button" role="menuitem" onClick={() => { setContextMenu(null); void renameFileAt(contextMenu.path) }}><Pencil size={13} /> Rename or move… <kbd>F2</kbd></button>
           <button type="button" role="menuitem" onClick={() => { setContextMenu(null); void duplicateFile(contextMenu.path) }}><Copy size={13} /> Duplicate</button>
           <button type="button" role="menuitem" onClick={() => { setContextMenu(null); void copyFilePath(contextMenu.path) }}><Files size={13} /> Copy relative path</button>
