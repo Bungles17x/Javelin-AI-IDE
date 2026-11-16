@@ -1188,6 +1188,7 @@ async function handleAdmin(request, env, path) {
     if (!canViewAccount(actor, target)) {
       return authError('Accounts ranked above you are not visible.', 'ADMIN_RANK_RESTRICTED', 403)
     }
+    await logAdminAction(env, 'view_chat_history', target.id, actor.id, null)
     const { history, updatedAt } = await loadChatHistory(env, target.id)
     return json({
       user: adminUser(target),

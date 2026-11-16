@@ -52,6 +52,7 @@ class FakeD1 {
     this.logins = []
     this.support = []
     this.history = []
+    this.moderation = []
   }
 
   prepare(sql) {
@@ -270,6 +271,15 @@ class FakeD1 {
       return changed(1)
     }
     if (/^INSERT INTO moderation_actions /.test(sql)) {
+      this.moderation.push({
+        id: params[0],
+        action: params[1],
+        target_user_id: params[2],
+        actor_user_id: params[3],
+        reason: params[4],
+        created_at: params[5],
+        expires_at: params[6],
+      })
       return changed(1)
     }
     if (/^INSERT INTO support_requests /.test(sql)) {
@@ -651,6 +661,7 @@ check('an account can still read its own synced history', ownHistory.status === 
 const staffTargetChats = await call('/admin/user-history?identifier=TargetUser', { method: 'GET', token: staffToken })
 check('staff can read a visible account\'s chat history', staffTargetChats.status === 200 && staffTargetChats.data.user?.username === 'TargetUser' && staffTargetChats.data.history?.conversations?.[0]?.messages?.[0]?.content === 'The parser breaks on nested arrays.', JSON.stringify(staffTargetChats.data))
 check('the chat history includes attachment metadata', staffTargetChats.data.history?.conversations?.[0]?.messages?.[2]?.attachments?.[0]?.name === 'trace.txt', JSON.stringify(staffTargetChats.data))
+check('opening a chat history writes a moderation audit record', db.moderation.some((row) => row.action === 'view_chat_history' && row.target_user_id === targetSignup.data.session.user.id && row.actor_user_id === staffLogin.data.session.user.id), JSON.stringify(db.moderation))
 const staffOwnerChats = await call('/admin/user-history?identifier=Bungles17x', { method: 'GET', token: staffToken })
 check('staff cannot read a higher-ranked account\'s chat history', staffOwnerChats.status === 403 && staffOwnerChats.data.error?.code === 'ADMIN_RANK_RESTRICTED', JSON.stringify(staffOwnerChats.data))
 const ownerTargetChats = await call('/admin/user-history?identifier=TargetUser', { method: 'GET', token: ownerToken })

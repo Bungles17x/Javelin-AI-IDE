@@ -253,6 +253,13 @@ function conversationTitle(messages = []) {
   return text.length > 58 ? `${text.slice(0, 57).trimEnd()}…` : text
 }
 
+function formatDuration(value) {
+  const ms = Number(value)
+  if (!Number.isFinite(ms) || ms <= 0) return '—'
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`
+}
+
 function conversationFromMessages(messages, id = nextConversationId()) {
   const now = Date.now()
   return {
@@ -1574,7 +1581,10 @@ function App() {
   }, [])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    // Smooth scrolling while tokens stream queues an animation per update and
+    // competes with rendering the answer. Jump during the stream; animate only
+    // when the thread settles.
+    bottomRef.current?.scrollIntoView({ behavior: isStreaming ? 'auto' : 'smooth', block: 'end' })
   }, [messages, isStreaming, steps, phase])
 
   // Keep the model valid for the selected provider.
@@ -1911,17 +1921,52 @@ function App() {
       const controller = new AbortController()
       chatAbortsRef.current.add(controller)
       let acc = ''
+      let streamTimer = 0
+      let lastPushed = ''
+      let firstTokenAt = 0
+      const startedAt = performance.now()
       const updateAssistant = (nextContent) => {
+        lastPushed = nextContent
         setMessages((prev) => prev.map((message) => (
           message.id === assistantId ? { ...message, content: nextContent } : message
         )))
       }
+      const clearStreamTimer = () => {
+        if (streamTimer) {
+          window.clearTimeout(streamTimer)
+          streamTimer = 0
+        }
+      }
+      const flushAssistant = () => {
+        clearStreamTimer()
+        if (lastPushed !== acc) updateAssistant(acc)
+      }
+      const finishAssistant = () => {
+        flushAssistant()
+        const totalMs = Math.max(0, Math.round(performance.now() - startedAt))
+        const firstTokenMs = firstTokenAt ? Math.max(0, Math.round(firstTokenAt - startedAt)) : 0
+        setMessages((prev) => prev.map((message) => (
+          message.id === assistantId
+            ? { ...message, content: acc, metrics: { firstTokenMs, totalMs, chars: acc.length } }
+            : message
+        )))
+      }
       const removeAssistant = () => {
+        clearStreamTimer()
         setMessages((prev) => prev.filter((message) => message.id !== assistantId))
       }
       const applyToken = (delta) => {
+        if (!firstTokenAt) firstTokenAt = performance.now()
         acc += delta
-        updateAssistant(acc)
+        // One state write (and one localStorage write) per ~50 ms instead of
+        // one per token. The stream stays visibly live without re-rendering
+        // the whole thread and parsing Markdown hundreds of times.
+        if (!streamTimer) {
+          streamTimer = window.setTimeout(() => {
+            streamTimer = 0
+            if (lastPushed !== acc) updateAssistant(acc)
+          }, 50)
+        }
       }
       const runReply = async () => {
         await streamChat({
@@ -1939,6 +1984,7 @@ function App() {
         // failure named, replacing the text as it streams instead of appending to
         // the echo. One retry only: a model that echoes twice will not learn.
         if (isEcho(acc, content)) {
+          clearStreamTimer()
           acc = ''
           updateAssistant('')
           await streamChat({
@@ -1962,6 +2008,7 @@ function App() {
           acc = 'I didn\'t get a reply back from the model on that one — say it again and I\'ll take another run at it.'
           updateAssistant(acc)
         }
+        finishAssistant()
       }
       try {
         await ensureDesktopRuntime()
@@ -1975,14 +2022,18 @@ function App() {
         // replies in flight, speaking all of them at once would be unusable.
         if (activeChatsRef.current <= 1) speakReply(acc, assistantId)
       } catch (err) {
+        clearStreamTimer()
         if (err?.name === 'AbortError') {
           if (!acc) removeAssistant()
+          else updateAssistant(acc)
         } else {
           const detail = describeError(err)
+          acc = `⚠️ ${detail}`
           updateAssistant(`⚠️ ${detail}`)
           if (activeChatsRef.current <= 1) setError(detail)
         }
       } finally {
+        clearStreamTimer()
         chatAbortsRef.current.delete(controller)
         finishChatResponse()
         textareaRef.current?.focus()
@@ -2669,7 +2720,7 @@ function App() {
       ? historySync.error
       : historySync.at
         ? `Last synced ${new Date(historySync.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-        : 'Sync this account\'s chats across devices'
+        : 'Sync this account\'s chats across devices. Synced chats may be reviewed by staff for moderation.'
 
   const showDesktopCode = Boolean(desktopApi && desktopView === 'code')
   const desktopRootClass = showDesktopCode
@@ -4047,7 +4098,9 @@ function Message({ message, isStreaming, onPlay, isSpeaking = false }) {
             {message.content && <Markdown>{message.content}</Markdown>}
           </>
         ) : message.content ? (
-          <Markdown>{message.content}</Markdown>
+          isStreaming
+            ? <div className="msg-stream-text whitespace-pre-wrap text-sm">{message.content}</div>
+            : <Markdown>{message.content}</Markdown>
         ) : (
           <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
             <span className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
@@ -4056,6 +4109,14 @@ function Message({ message, isStreaming, onPlay, isSpeaking = false }) {
         )}
         {isStreaming && message.content && (
           <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-foreground/60 align-text-bottom" />
+        )}
+        {!isUser && !isStreaming && message.metrics?.totalMs > 0 && (
+          <div className="msg-metrics" title="Measured in this app session">
+            <Zap size={11} />
+            <span>{formatDuration(message.metrics.firstTokenMs)} first token</span>
+            <span>{formatDuration(message.metrics.totalMs)} total</span>
+            <span>{Number(message.metrics.chars || 0).toLocaleString()} chars</span>
+          </div>
         )}
         {!isUser && message.content && !isStreaming && (
           <div className="msg-actions">

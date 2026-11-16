@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  AlertCircle, ArrowLeft, Ban, CheckCircle2, Clock, EyeOff, MessageSquare, Paperclip, RefreshCw, Search, ShieldCheck, Terminal, User, Users, X,
+  AlertCircle, ArrowLeft, Ban, Check, CheckCircle2, Clock, Copy, Download, EyeOff, MessageSquare, Paperclip, RefreshCw, Search, ShieldCheck, Terminal, User, Users, X,
 } from 'lucide-react'
 import {
   banAccount, fetchAdminStats, fetchAdminUserHistory, fetchAdminUsers, setAccountRole, unbanAccount,
@@ -44,6 +44,24 @@ function roleLabel(role) {
   return 'System'
 }
 
+function conversationText(conversation) {
+  const lines = [
+    `# ${conversation.title || 'Untitled conversation'}`,
+    `Updated: ${shortDateTime(conversation.updatedAt)}`,
+    '',
+  ]
+  for (const message of conversation.messages) {
+    lines.push(`## ${roleLabel(message.role)}${message.ts ? ` · ${shortDateTime(message.ts)}` : ''}`)
+    lines.push(message.content || '(empty message)')
+    for (const attachment of message.attachments || []) {
+      lines.push(`[Attachment: ${attachment.name || attachment.kind}${attachment.mime ? ` · ${attachment.mime}` : ''}${formatBytes(attachment.size) ? ` · ${formatBytes(attachment.size)}` : ''}]`)
+    }
+    if (message.image?.prompt) lines.push(`[Image prompt: ${message.image.prompt}]`)
+    lines.push('')
+  }
+  return lines.join('\n')
+}
+
 function expiryLabel(value) {
   if (!value) return 'Permanent'
   const date = new Date(value)
@@ -70,6 +88,8 @@ export function AdminScreen({ open, session, onClose }) {
   const [chatLoading, setChatLoading] = useState(false)
   const [chatError, setChatError] = useState('')
   const [activeChatId, setActiveChatId] = useState('')
+  const [chatQuery, setChatQuery] = useState('')
+  const [chatCopied, setChatCopied] = useState(false)
   const commandRef = useRef(null)
   const chatRequestRef = useRef(0)
   const token = session?.token
@@ -83,6 +103,8 @@ export function AdminScreen({ open, session, onClose }) {
     setChatLoading(false)
     setChatError('')
     setActiveChatId('')
+    setChatQuery('')
+    setChatCopied(false)
   }, [])
 
   const load = useCallback(async (nextQuery = '') => {
@@ -241,6 +263,8 @@ export function AdminScreen({ open, session, onClose }) {
     setChatLoading(true)
     setChatError('')
     setActiveChatId('')
+    setChatQuery('')
+    setChatCopied(false)
     try {
       const result = await fetchAdminUserHistory(token, user.id)
       if (requestId !== chatRequestRef.current) return
@@ -259,6 +283,40 @@ export function AdminScreen({ open, session, onClose }) {
 
   const conversations = chatHistory?.conversations || []
   const activeConversation = conversations.find((conversation) => conversation.id === activeChatId) || conversations[0] || null
+  const chatNeedle = chatQuery.trim().toLowerCase()
+  const filteredConversations = chatNeedle
+    ? conversations.filter((conversation) => (
+      String(conversation.title || '').toLowerCase().includes(chatNeedle)
+      || conversation.messages.some((message) => String(message.content || '').toLowerCase().includes(chatNeedle))
+    ))
+    : conversations
+
+  const copyConversation = async () => {
+    if (!activeConversation) return
+    try {
+      await navigator.clipboard.writeText(conversationText(activeConversation))
+      setChatCopied(true)
+      window.setTimeout(() => setChatCopied(false), 1500)
+    } catch {
+      setChatCopied(false)
+    }
+  }
+
+  const exportConversation = () => {
+    if (!activeConversation || !chatUser) return
+    const payload = {
+      account: { id: chatUser.id, username: chatUser.username, email: chatUser.email, role: chatUser.role },
+      conversation: activeConversation,
+      exportedAt: new Date().toISOString(),
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `javelin-chat-${chatUser.username}-${activeConversation.id}.json`
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
 
   return (
     <div className="admin-backdrop" role="dialog" aria-modal="true" aria-labelledby="admin-title">
@@ -414,6 +472,11 @@ export function AdminScreen({ open, session, onClose }) {
               </button>
             </header>
 
+            <div className="admin-chat-privacy">
+              <ShieldCheck size={13} />
+              <span><strong>Audited staff view.</strong> This open is recorded in the moderation log. Only cloud-synced messages are shown.</span>
+            </div>
+
             {chatUser.banned && (
               <p className="admin-chat-ban">
                 <Clock size={12} /> {expiryLabel(chatUser.banExpiresAt)} · {chatUser.banReason || 'No reason provided.'}
@@ -436,11 +499,23 @@ export function AdminScreen({ open, session, onClose }) {
                 <nav className="admin-chat-list" aria-label="Synced conversations">
                   <div className="admin-chat-list-head">
                     <span>Conversations</span>
-                    <small>{conversations.length}</small>
+                    <small>{chatNeedle ? `${filteredConversations.length} / ${conversations.length}` : conversations.length}</small>
                   </div>
+                  <label className="admin-chat-search">
+                    <Search size={12} />
+                    <span className="sr-only">Search synced conversations</span>
+                    <input
+                      value={chatQuery}
+                      onChange={(event) => setChatQuery(event.target.value)}
+                      placeholder="Search chats or messages"
+                      autoComplete="off"
+                    />
+                  </label>
                   {conversations.length === 0 ? (
                     <p className="admin-chat-empty">No synced conversations for this account.</p>
-                  ) : conversations.map((conversation) => (
+                  ) : filteredConversations.length === 0 ? (
+                    <p className="admin-chat-empty">No conversations match “{chatQuery.trim()}”.</p>
+                  ) : filteredConversations.map((conversation) => (
                     <button
                       key={conversation.id}
                       type="button"
@@ -461,7 +536,16 @@ export function AdminScreen({ open, session, onClose }) {
                           <strong>{activeConversation.title || 'Untitled conversation'}</strong>
                           <small>{activeConversation.messages.length} message{activeConversation.messages.length === 1 ? '' : 's'} · Updated {shortDateTime(activeConversation.updatedAt)}</small>
                         </div>
-                        <span className="admin-chat-scope">{isOwner ? 'Owner view' : 'Rank-limited view'}</span>
+                        <div className="admin-chat-thread-tools">
+                          <span className="admin-chat-scope">{isOwner ? 'Owner view' : 'Rank-limited view'}</span>
+                          <button type="button" className="admin-chat-tool" onClick={() => void copyConversation()} title="Copy conversation">
+                            {chatCopied ? <Check size={12} /> : <Copy size={12} />}
+                            {chatCopied ? 'Copied' : 'Copy'}
+                          </button>
+                          <button type="button" className="admin-chat-tool" onClick={exportConversation} title="Export conversation as JSON">
+                            <Download size={12} /> Export
+                          </button>
+                        </div>
                       </div>
                       <div className="admin-chat-messages">
                         {activeConversation.messages.length === 0 ? (
