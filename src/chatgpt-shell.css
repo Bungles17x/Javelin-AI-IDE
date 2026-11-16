@@ -1501,3 +1501,97 @@ html.dark .javelin-desktop-layout.is-chat-view .javelin-assistant-column {
 }
 
 .javelin-desktop-layout.is-code-view .javelin-assistant-column .app-footer p { color: var(--gpt-muted); }
+
+/* ---------- Chat surface polish ---------- */
+
+/* A low, warm wash gives the conversation depth without competing with the
+   text. It is anchored to the viewport, so it does not travel with scrolling. */
+.javelin-desktop-layout.is-chat-view .javelin-assistant-column main,
+.javelin-browser-layout:not(.is-mobile-chat) main {
+  background:
+    radial-gradient(ellipse 72% 46% at 50% -14%, rgba(211, 239, 116, 0.11), transparent 72%),
+    var(--gpt-bg);
+}
+
+html.dark .javelin-desktop-layout.is-chat-view .javelin-assistant-column main,
+html.dark .javelin-browser-layout:not(.is-mobile-chat) main {
+  background:
+    radial-gradient(ellipse 72% 46% at 50% -14%, rgba(211, 239, 116, 0.07), transparent 72%),
+    var(--gpt-bg);
+}
+
+/* The empty-state mark carries the same lime language as the code workspace,
+   with a halo that keeps it from looking pasted onto the flat surface. */
+.javelin-desktop-layout.is-chat-view .chat-hero-orb,
+.javelin-browser-layout:not(.is-mobile-chat) .chat-hero-orb {
+  background: linear-gradient(145deg, #f0ffb8 0%, #c9ea78 54%, #a7cc5b 100%);
+  color: #1a240c;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    inset 0 -10px 18px -14px rgba(70, 100, 15, 0.35),
+    0 0 0 8px rgba(211, 239, 116, 0.08),
+    0 18px 34px -20px rgba(120, 160, 40, 0.75);
+}
+
+.javelin-desktop-layout.is-chat-view .example-card,
+.javelin-browser-layout:not(.is-mobile-chat) .example-card {
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.javelin-desktop-layout.is-chat-view .example-card:hover,
+.javelin-browser-layout:not(.is-mobile-chat) .example-card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--gpt-border) 55%, #a9cc5a 45%);
+  box-shadow: 0 12px 28px -24px rgba(0, 0, 0, 0.5);
+}
+
+.javelin-desktop-layout.is-chat-view .composer-row,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-row {
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.javelin-desktop-layout.is-chat-view .composer-row:focus-within,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-row:focus-within {
+  border-color: color-mix(in srgb, var(--gpt-border) 48%, #a9cc5a 52%);
+  background: var(--gpt-bg);
+  box-shadow:
+    0 0 0 3px rgba(190, 222, 105, 0.12),
+    0 18px 38px -30px rgba(0, 0, 0, 0.55);
+}
+
+.javelin-desktop-layout.is-chat-view .composer-send,
+.javelin-browser-layout:not(.is-mobile-chat) .composer-send {
+  transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
+}
+
+.javelin-desktop-layout.is-chat-view .composer-send:hover:not(:disabled),
+.javelin-browser-layout:not(.is-mobile-chat) .composer-send:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px -12px rgba(0, 0, 0, 0.55);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .javelin-desktop-layout.is-chat-view .example-card,
+  .javelin-browser-layout:not(.is-mobile-chat) .example-card,
+  .javelin-desktop-layout.is-chat-view .composer-row,
+  .javelin-browser-layout:not(.is-mobile-chat) .composer-row,
+  .javelin-desktop-layout.is-chat-view .composer-send,
+  .javelin-browser-layout:not(.is-mobile-chat) .composer-send {
+    transition: none;
+  }
+
+  .javelin-desktop-layout.is-chat-view .example-card:hover,
+  .javelin-browser-layout:not(.is-mobile-chat) .example-card:hover,
+  .javelin-desktop-layout.is-chat-view .composer-send:hover:not(:disabled),
+  .javelin-browser-layout:not(.is-mobile-chat) .composer-send:hover:not(:disabled) {
+    transform: none;
+  }
+}
