@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  AlertCircle, Ban, CheckCircle2, Clock, RefreshCw, Search, ShieldCheck, Terminal, User, Users, X,
+  AlertCircle, Ban, CheckCircle2, Clock, EyeOff, RefreshCw, Search, ShieldCheck, Terminal, User, Users, X,
 } from 'lucide-react'
 import {
   banAccount, fetchAdminStats, fetchAdminUsers, setAccountRole, unbanAccount,
@@ -130,7 +130,7 @@ export function AdminScreen({ open, session, onClose }) {
         setOutput(`${next.length} account${next.length === 1 ? '' : 's'} loaded${nextQuery ? ` for “${nextQuery}”` : ''}.`)
       } else if (name === 'stats') {
         const next = await load(query)
-        setOutput(`${next.length} accounts shown. The stats panel has the full totals.`)
+        setOutput(`${next.length} accounts shown. The stats panel shows totals for your visible scope.`)
       } else if (name === 'ban' || name === 'tempban') {
         const identifier = words.shift()
         if (!identifier) throw new Error(`Usage: ${name} <username|email|id> ${name === 'tempban' ? '<days> ' : ''}[reason]`)
@@ -210,8 +210,18 @@ export function AdminScreen({ open, session, onClose }) {
         </header>
 
         <div className="admin-body">
+          {stats?.restricted && (
+            <div className="admin-scope-banner" role="status">
+              <span className="admin-scope-icon"><EyeOff size={15} /></span>
+              <div className="admin-scope-copy">
+                <strong>Rank-limited view</strong>
+                <span>Owner accounts are hidden because they rank above you. All member and staff accounts are visible.</span>
+              </div>
+            </div>
+          )}
+
           <div className="admin-stats" aria-live="polite">
-            <div className="admin-stat"><Users size={15} /><strong>{stats?.total ?? '—'}</strong><span>accounts</span></div>
+            <div className="admin-stat"><Users size={15} /><strong>{stats?.total ?? '—'}</strong><span>{stats?.restricted ? 'visible accounts' : 'accounts'}</span></div>
             <div className="admin-stat"><ShieldCheck size={15} /><strong>{stats?.staff ?? '—'}</strong><span>staff</span></div>
             <div className="admin-stat"><Ban size={15} /><strong>{stats?.banned ?? '—'}</strong><span>active bans</span></div>
             <div className="admin-stat"><User size={15} /><strong>{stats?.members ?? '—'}</strong><span>members</span></div>

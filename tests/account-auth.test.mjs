@@ -577,8 +577,10 @@ console.log('\n6b. Admin commands, bans and staff roles')
 const ownerToken = ownerSignup.data.session.token
 const adminUsers = await call('/admin/users', { method: 'GET', token: ownerToken })
 check('the owner can list accounts', adminUsers.status === 200 && adminUsers.data.users?.some((user) => user.username === member.username), JSON.stringify(adminUsers.data))
+check('the owner scope is unrestricted', adminUsers.data.scope?.restricted === false && adminUsers.data.scope?.viewerRole === 'owner', JSON.stringify(adminUsers.data.scope))
 const adminStats = await call('/admin/stats', { method: 'GET', token: ownerToken })
 check('the owner can read moderation stats', adminStats.status === 200 && adminStats.data.total >= 2 && adminStats.data.owners === 1, JSON.stringify(adminStats.data))
+check('owner stats are unrestricted', adminStats.data.restricted === false, JSON.stringify(adminStats.data))
 check('members cannot use admin commands', (await call('/admin/users', { method: 'GET', token })).status === 403)
 const banResult = await call('/admin/ban', {
   token: ownerToken,
@@ -606,6 +608,14 @@ check('staff login carries the staff role', staffLogin.data.session?.user?.role 
 const targetSignup = await call('/signup', {
   body: { username: 'TargetUser', email: 'target@example.com', password: 'target-password' },
 })
+const staffDirectory = await call('/admin/users', { method: 'GET', token: staffToken })
+check('staff can list member accounts', staffDirectory.status === 200 && staffDirectory.data.users?.some((user) => user.username === 'TargetUser'), JSON.stringify(staffDirectory.data))
+check('staff cannot see an account ranked above them', !staffDirectory.data.users?.some((user) => user.role === 'owner' || user.email === 'owner@example.com'), JSON.stringify(staffDirectory.data))
+check('staff directory reports its rank-limited scope', staffDirectory.data.scope?.restricted === true && staffDirectory.data.scope?.viewerRole === 'staff', JSON.stringify(staffDirectory.data.scope))
+const staffOwnerSearch = await call('/admin/users?query=Bungles17x', { method: 'GET', token: staffToken })
+check('staff search cannot reveal a higher-ranked account', staffOwnerSearch.status === 200 && staffOwnerSearch.data.users?.length === 0, JSON.stringify(staffOwnerSearch.data))
+const staffStats = await call('/admin/stats', { method: 'GET', token: staffToken })
+check('staff stats only count visible accounts', staffStats.status === 200 && staffStats.data.restricted === true && staffStats.data.total === staffDirectory.data.users.length && staffStats.data.owners === undefined, JSON.stringify(staffStats.data))
 const staffBan = await call('/admin/ban', {
   token: staffToken,
   body: { identifier: 'TargetUser', reason: 'Staff moderation test' },

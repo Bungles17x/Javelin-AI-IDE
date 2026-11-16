@@ -1058,6 +1058,18 @@ function isAdminRole(role) {
   return role === 'owner' || role === 'staff'
 }
 
+// Moderation visibility follows the staff hierarchy: a viewer can see accounts
+// at their own rank and below, never an account ranked above them.
+const ROLE_RANK = Object.freeze({ member: 0, staff: 1, owner: 2 })
+
+function roleRank(role) {
+  return ROLE_RANK[String(role || '').toLowerCase()] ?? 0
+}
+
+function canViewAccount(actor, target) {
+  return roleRank(target.role) <= roleRank(actor.role)
+}
+
 function bannedAuthError(ban) {
   return authError(
     'This account is suspended. Contact support if you believe this is a mistake.',
@@ -1125,16 +1137,21 @@ async function handleAdmin(request, env, path) {
     const rows = await env.DB.prepare(
       'SELECT id, username, email, role, created_at, email_verified_at, banned_at, ban_reason, ban_expires_at FROM users ORDER BY created_at DESC LIMIT 200',
     ).all()
-    const allUsers = rows?.results ?? []
+    const restricted = actor.role !== 'owner'
+    // This is applied here, before search or serialization, so a higher-ranked
+    // account cannot leak through a crafted query or the stats endpoint.
+    const allUsers = (rows?.results ?? []).filter((row) => canViewAccount(actor, row))
     if (path === '/admin/stats') {
       const now = Date.now()
       const activeBans = allUsers.filter((row) => row.banned_at && (!row.ban_expires_at || Date.parse(row.ban_expires_at) > now)).length
       return json({
         total: allUsers.length,
-        owners: allUsers.filter((row) => row.role === 'owner').length,
+        ...(restricted ? {} : { owners: allUsers.filter((row) => row.role === 'owner').length }),
         staff: allUsers.filter((row) => row.role === 'staff').length,
         members: allUsers.filter((row) => row.role === 'member').length,
         banned: activeBans,
+        restricted,
+        viewerRole: actor.role,
       })
     }
     const query = cleanAdminText(new URL(request.url).searchParams.get('query'), 80).toLowerCase()
@@ -1142,7 +1159,10 @@ async function handleAdmin(request, env, path) {
       .filter((row) => !query || row.username.toLowerCase().includes(query) || row.email.toLowerCase().includes(query))
       .slice(0, 100)
       .map(adminUser)
-    return json({ users })
+    return json({
+      users,
+      scope: { restricted, viewerRole: actor.role },
+    })
   }
 
   if (request.method !== 'POST') return authError('Use POST.', 'METHOD_NOT_ALLOWED', 405)
