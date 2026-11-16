@@ -41,6 +41,7 @@ import { generateImage, imagePromptIssue, imageRequestSubject, isImageRequest } 
 import { readImageForTextModel } from './lib/imageReading'
 import { buildSyncPayload, historyFingerprint, mergeHistory, pruneDeletedConversations } from './lib/chatHistory'
 import { generateChatTitle } from './lib/chatTitles'
+import { plainTextFromMarkdown, shouldUseMarkdown } from './lib/responseFormat'
 
 const STORAGE = {
   apiKey: 'javelin.apiKey',
@@ -193,6 +194,18 @@ function messageForApi(message, { textOnly = false } = {}) {
       ...images.map((image) => ({ type: 'image_url', image_url: { url: image.dataUrl } })),
     ],
   }
+}
+
+function messageText(message) {
+  const content = message?.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((part) => part?.type === 'text')
+      .map((part) => String(part.text ?? ''))
+      .join('\n')
+  }
+  return ''
 }
 
 const IMAGE_EXAMPLES = [
@@ -2705,6 +2718,13 @@ function App() {
       : guestRemaining === 0 ? 'is-empty' : ''
   const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId)
   const activeConversationTitle = activeConversation?.title || conversationTitle(messages)
+  const replyFormats = useMemo(() => {
+    let request = ''
+    return messages.map((message) => {
+      if (message?.role === 'user') request = messageText(message)
+      return message?.role === 'assistant' ? shouldUseMarkdown(messageText(message), request) : false
+    })
+  }, [messages])
   const historySyncLabel = !account
     ? 'Saved on this device'
     : historySync.state === 'syncing'
@@ -3179,6 +3199,7 @@ function App() {
             <Message
               key={m.id ?? m.ts ?? i}
               message={m}
+              richText={Boolean(replyFormats[i])}
               isStreaming={isStreaming && i === messages.length - 1 && m.role === 'assistant'}
               isSpeaking={speakingMessageId === (m.id ?? i)}
               onPlay={m.role === 'assistant' && m.content && !m.image
@@ -4047,7 +4068,7 @@ function MessageAttachments({ attachments }) {
   )
 }
 
-function Message({ message, isStreaming, onPlay, isSpeaking = false }) {
+function Message({ message, isStreaming, onPlay, isSpeaking = false, richText = false }) {
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
 
@@ -4095,12 +4116,16 @@ function Message({ message, isStreaming, onPlay, isSpeaking = false }) {
         ) : message.image?.status === 'ready' ? (
           <>
             <GeneratedImage image={message.image} />
-            {message.content && <Markdown>{message.content}</Markdown>}
+            {message.content && (richText
+              ? <Markdown>{message.content}</Markdown>
+              : <div className="msg-plain-text">{plainTextFromMarkdown(message.content)}</div>)}
           </>
         ) : message.content ? (
           isStreaming
             ? <div className="msg-stream-text whitespace-pre-wrap text-sm">{message.content}</div>
-            : <Markdown>{message.content}</Markdown>
+            : richText
+              ? <Markdown>{message.content}</Markdown>
+              : <div className="msg-plain-text">{plainTextFromMarkdown(message.content)}</div>
         ) : (
           <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
             <span className="h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
@@ -4132,10 +4157,12 @@ function Message({ message, isStreaming, onPlay, isSpeaking = false }) {
                 <span>{isSpeaking ? 'Stop' : 'Play aloud'}</span>
               </button>
             )}
-            <button type="button" className="msg-copy" onClick={copyMessage} aria-label="Copy reply">
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-              <span>{copied ? 'Copied' : 'Copy'}</span>
-            </button>
+            {richText && (
+              <button type="button" className="msg-copy" onClick={copyMessage} aria-label="Copy reply">
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+                <span>{copied ? 'Copied' : 'Copy'}</span>
+              </button>
+            )}
           </div>
         )}
       </div>

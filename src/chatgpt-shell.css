@@ -896,6 +896,12 @@ html.dark .javelin-desktop-layout.is-chat-view .javelin-assistant-column {
   white-space: pre-wrap;
 }
 
+.msg-plain-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.65;
+}
+
 .msg-metrics {
   display: flex;
   flex-wrap: wrap;
