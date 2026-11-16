@@ -5,13 +5,13 @@
   "description": "Javelin AI - Independent AI ecosystem with local model, inference engine, and training pipeline.",
   "license": "MIT",
   "author": "Javelin AI",
-  "homepage": "https://github.com/javelin-ai/javelin-ai-assistant#readme",
+  "homepage": "https://github.com/Bungles17x/Javelin-AI-IDE#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/javelin-ai/javelin-ai-assistant.git"
+    "url": "https://github.com/Bungles17x/Javelin-AI-IDE.git"
   },
   "bugs": {
-    "url": "https://github.com/javelin-ai/javelin-ai-assistant/issues"
+    "url": "https://github.com/Bungles17x/Javelin-AI-IDE/issues"
   },
   "keywords": [
     "ai",
@@ -29,6 +29,7 @@
     "dev": "vite",
     "desktop:dev": "node scripts/dev-desktop.mjs",
     "desktop:build": "npm run build && node scripts/prepare-monaco.mjs dist && electron-builder --win nsis",
+    "desktop:publish": "npm run build && node scripts/prepare-monaco.mjs dist && electron-builder --win nsis --publish always",
     "build": "vite build",
     "preview": "vite preview",
     "test": "node tests/run.mjs",
@@ -60,6 +61,7 @@
   "dependencies": {
     "@huggingface/transformers": "^4.3.2",
     "clsx": "^2.1.0",
+    "electron-updater": "^6.8.11",
     "lucide-react": "^0.344.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -83,6 +85,7 @@
   "build": {
     "appId": "ai.javelin.ide",
     "productName": "Javelin AI IDE",
+    "artifactName": "Javelin-AI-IDE-Setup-${version}.${ext}",
     "directories": {
       "output": "release"
     },
@@ -96,6 +99,12 @@
     "win": {
       "target": "nsis",
       "icon": "vscode-extension/icon.png"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Bungles17x",
+      "repo": "Javelin-AI-IDE",
+      "releaseType": "release"
     },
     "nsis": {
       "oneClick": false,

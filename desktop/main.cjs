@@ -1,4 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain } = require('electron')
+const { autoUpdater } = require('electron-updater')
 const fs = require('node:fs/promises')
 const { existsSync } = require('node:fs')
 const http = require('node:http')
@@ -16,6 +17,19 @@ const MAX_WORKSPACE_FILES = 4000
 let workspaceRoot = null
 const runningCommands = new Map()
 let rendererServer = null
+let updateTimer = null
+let updateDialogOpen = false
+const UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000
+
+async function logUpdate(message) {
+  const line = `[${new Date().toISOString()}] ${message}\n`
+  console.log(line.trim())
+  try {
+    await fs.appendFile(path.join(app.getPath('userData'), 'update.log'), line, 'utf8')
+  } catch {
+    // Diagnostics must never interfere with the app or the update.
+  }
+}
 
 const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
@@ -401,6 +415,67 @@ function createWindow(rendererUrl) {
   window.loadURL(process.env.JAVELIN_DEV_SERVER === '1' ? 'http://127.0.0.1:4317' : rendererUrl)
 }
 
+/**
+ * Keep installed copies current without another setup download. The release
+ * workflow publishes every push to main as a GitHub release; electron-updater
+ * checks the newest release on launch and while the app stays open.
+ */
+function setupAutoUpdates() {
+  if (!app.isPackaged) return
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.allowPrerelease = false
+  // A per-user NSIS package would otherwise default to %LOCALAPPDATA% and
+  // create a second install. Pin the update to the directory this copy runs
+  // from, whether that is Program Files or a per-user location.
+  autoUpdater.installDirectory = path.dirname(process.execPath)
+
+  autoUpdater.on('checking-for-update', () => {
+    void logUpdate('Checking for updates.')
+  })
+  autoUpdater.on('update-available', (info) => {
+    void logUpdate(`Update ${info.version} available; downloading.`)
+  })
+  autoUpdater.on('update-not-available', (info) => {
+    void logUpdate(`Already current at ${info.version}.`)
+  })
+  autoUpdater.on('error', (error) => {
+    void logUpdate(`Update check failed: ${String(error?.message ?? error)}`)
+  })
+  autoUpdater.on('update-downloaded', async (info) => {
+    await logUpdate(`Update ${info.version} downloaded and ready to install.`)
+    if (updateDialogOpen) return
+    updateDialogOpen = true
+    try {
+      const result = await dialog.showMessageBox({
+        type: 'info',
+        title: 'Javelin update ready',
+        message: `Javelin AI IDE ${info.version} is ready.`,
+        detail: 'Restart once to apply the update. Your chats and projects stay on this computer.',
+        buttons: ['Restart now', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      })
+      if (result.response === 0) {
+        // Silent install keeps the update to one click; NSIS relaunches the app.
+        setTimeout(() => autoUpdater.quitAndInstall(true, true), 100)
+      }
+    } catch (error) {
+      await logUpdate(`Could not show the update prompt: ${String(error?.message ?? error)}`)
+    } finally {
+      updateDialogOpen = false
+    }
+  })
+
+  const check = () => {
+    // The updater emits its own error event, which is logged above.
+    autoUpdater.checkForUpdates().catch(() => {})
+  }
+  setTimeout(check, 5000)
+  updateTimer = setInterval(check, UPDATE_CHECK_INTERVAL_MS)
+}
+
 app.setName('Javelin AI IDE')
 
 // On some Windows setups Electron's media capture stalls forever instead of rejecting:
@@ -423,6 +498,7 @@ app.whenReady().then(async () => {
 
   const rendererUrl = process.env.JAVELIN_DEV_SERVER === '1' ? null : await startRendererServer()
   createWindow(rendererUrl)
+  setupAutoUpdates()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -432,4 +508,8 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => rendererServer?.close())
+app.on('before-quit', () => {
+  if (updateTimer) clearInterval(updateTimer)
+  updateTimer = null
+  rendererServer?.close()
+})
