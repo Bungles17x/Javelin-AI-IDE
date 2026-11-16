@@ -145,44 +145,151 @@ export function speechChunks(text, maxChars = 180) {
  */
 export function createSpeaker(win = typeof window !== 'undefined' ? window : undefined) {
   if (!win?.speechSynthesis) {
-    return { supported: false, speak: async () => false, stop: () => {}, speaking: () => false }
+    return {
+      supported: false,
+      speak: async () => false,
+      stop: () => {},
+      speaking: () => false,
+      unlock: async () => false,
+      isUnlocked: () => false,
+      lastError: () => null,
+    }
   }
   const synth = win.speechSynthesis
-  let cancelled = false
+  let runId = 0
+  let unlocked = false
+  let unlocking = null
+  let lastError = null
+  const liveUtterances = new Set()
 
   const stop = () => {
-    cancelled = true
+    runId += 1
     try {
       synth.cancel()
     } catch {
       // Nothing to cancel.
     }
+    liveUtterances.clear()
+  }
+
+  /**
+   * Open the speech session from inside a tap/click.
+   *
+   * iOS Safari only relaxes its speech autoplay restriction when the first
+   * `speak()` happens on the synchronous click stack. A silent utterance here
+   * lets the answer arrive later and still be spoken. Chrome Android applies a
+   * similar first-play restriction.
+   */
+  const unlock = () => {
+    if (unlocked) return Promise.resolve(true)
+    if (unlocking) return unlocking
+    let utterance
+    try {
+      utterance = new win.SpeechSynthesisUtterance(' ')
+    } catch {
+      return Promise.resolve(false)
+    }
+    unlocking = new Promise((resolve) => {
+      let settled = false
+      const finish = (ok) => {
+        if (settled) return
+        settled = true
+        liveUtterances.delete(utterance)
+        unlocking = null
+        if (ok) unlocked = true
+        resolve(ok)
+      }
+      utterance.volume = 0
+      utterance.rate = 10
+      utterance.pitch = 1
+      utterance.lang = 'en'
+      utterance.onend = () => finish(true)
+      utterance.onerror = () => finish(false)
+      liveUtterances.add(utterance)
+      try {
+        synth.speak(utterance)
+        // Some engines do not emit events for an empty utterance.
+        win.setTimeout?.(() => finish(true), 300)
+      } catch (error) {
+        lastError = String(error?.message ?? error)
+        finish(false)
+      }
+    })
+    return unlocking
   }
 
   const speak = (text, { voiceURI = null, rate = 1, pitch = 1, lang = 'en' } = {}) =>
     new Promise((resolve) => {
       const chunks = speechChunks(text)
       if (!chunks.length) return resolve(false)
-      cancelled = false
+      const myRun = ++runId
+      lastError = null
+      // A new reply replaces anything already queued. resume() matters on iOS:
+      // a previous cancel can leave the shared engine paused.
+      try {
+        synth.cancel()
+        synth.resume?.()
+      } catch {
+        // The engine will report the failure when speak() is called.
+      }
       const voice = pickVoice(synth.getVoices?.() ?? [], voiceURI, lang)
       let index = 0
+      let settled = false
+
+      const finish = (ok) => {
+        if (settled) return
+        settled = true
+        resolve(ok)
+      }
 
       const next = () => {
-        if (cancelled || index >= chunks.length) return resolve(!cancelled)
-        const utterance = new win.SpeechSynthesisUtterance(chunks[index++])
+        if (settled) return
+        if (myRun !== runId) return finish(false)
+        if (index >= chunks.length) return finish(true)
+        let utterance
+        try {
+          utterance = new win.SpeechSynthesisUtterance(chunks[index++])
+        } catch (error) {
+          lastError = String(error?.message ?? error)
+          return finish(false)
+        }
         if (voice) utterance.voice = voice
         utterance.rate = rate
         utterance.pitch = pitch
         utterance.lang = voice?.lang || lang
-        utterance.onend = next
-        utterance.onerror = () => resolve(false)
-        synth.speak(utterance)
+        liveUtterances.add(utterance)
+        utterance.onend = () => {
+          liveUtterances.delete(utterance)
+          next()
+        }
+        utterance.onerror = (event) => {
+          liveUtterances.delete(utterance)
+          const reason = String(event?.error ?? '')
+          if (myRun !== runId || reason === 'interrupted' || reason === 'canceled') return finish(false)
+          lastError = reason || 'speech failed'
+          finish(false)
+        }
+        try {
+          synth.speak(utterance)
+          synth.resume?.()
+        } catch (error) {
+          lastError = String(error?.message ?? error)
+          finish(false)
+        }
       }
 
       next()
     })
 
-  return { supported: true, speak, stop, speaking: () => Boolean(synth.speaking) }
+  return {
+    supported: true,
+    speak,
+    stop,
+    speaking: () => Boolean(synth.speaking),
+    unlock,
+    isUnlocked: () => unlocked,
+    lastError: () => lastError,
+  }
 }
 
 /**

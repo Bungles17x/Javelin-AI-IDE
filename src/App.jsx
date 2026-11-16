@@ -29,7 +29,7 @@ import { fetchAccount, readStoredAccountSession, signOut as signOutOnlineAccount
 import { isConversational, isEcho, ECHO_RETRY_INSTRUCTION } from './core/conversation'
 import { createSpeaker, voiceCapabilities } from './lib/voice'
 import { createLocalDictation, openMicStream } from './lib/localSpeech'
-import { speakCloud, stopCloudSpeech, isCloudVoice } from './lib/cloudTts'
+import { speakCloud, stopCloudSpeech, isCloudVoice, primeCloudSpeech } from './lib/cloudTts'
 import { createBargeIn } from './lib/bargeIn'
 import {
   Sparkles, Send, Square, Trash2, Settings, Sun, Moon, User, Bot, AlertCircle, KeyRound,
@@ -546,6 +546,7 @@ function App() {
   const [ttsVoice, setTtsVoice] = useLocalStorage(STORAGE.ttsVoice, '')
   const [listening, setListening] = useState(false)
   const [voiceNotice, setVoiceNotice] = useState('')
+  const [speakingMessageId, setSpeakingMessageId] = useState(null)
   const speakerRef = useRef(null)
   const dictationRef = useRef(null)
   // Live voice keeps ONE microphone stream for its whole session: recording uses it,
@@ -1590,10 +1591,25 @@ function App() {
   const voiceCaps = useMemo(() => voiceCapabilities(), [])
   const speaker = useMemo(() => createSpeaker(), [])
 
-  const speakReply = useCallback(async (text) => {
-    if (!speakReplies || !text?.trim()) return
+  /** Open speech from a real tap. Both mobile engines reject the first async
+   * speak/play whether or not the user enabled spoken replies earlier. */
+  const unlockSpeech = useCallback(async () => {
+    const [systemReady] = await Promise.all([
+      speaker.unlock?.() ?? false,
+      isCloudVoice(ttsProvider) && ttsKey ? primeCloudSpeech() : false,
+    ])
+    return Boolean(systemReady)
+  }, [speaker, ttsProvider, ttsKey])
+
+  const speakReply = useCallback(async (text, messageId = null, { force = false } = {}) => {
+    if ((!force && !speakReplies) || !text?.trim()) return false
     const abort = new AbortController()
+    speechAbortRef.current?.abort()
     speechAbortRef.current = abort
+    stopCloudSpeech()
+    speaker.stop()
+    setSpeakingMessageId(messageId)
+    setVoiceNotice('')
 
     // While the answer is spoken, listen for the user cutting in. Speech is cancelled
     // from `interrupt`, which also starts recording, so the mic is never closed.
@@ -1601,14 +1617,22 @@ function App() {
 
     const finish = (spoken) => {
       stopBargeInRef.current?.()
-      if (speechAbortRef.current === abort) speechAbortRef.current = null
+      if (speechAbortRef.current === abort) {
+        speechAbortRef.current = null
+        setSpeakingMessageId(null)
+      }
       // Live mode is a loop, and the microphone is the half that must not depend on
       // the other: if speech synthesis fails or there is no voice installed, keep
       // listening anyway rather than ending the conversation silently.
       if (liveVoice && !abort.signal.aborted) {
         window.setTimeout(() => startListeningRef.current?.(), 300)
       }
-      void spoken
+      if (!spoken && !abort.signal.aborted) {
+        setVoiceNotice(force
+          ? 'Speech could not start. Check the phone volume and tap Play aloud again.'
+          : 'Speech could not start automatically. Tap Play aloud on the reply.')
+      }
+      return spoken
     }
 
     // A configured cloud voice is the point of this feature; the system voice is the
@@ -1629,8 +1653,13 @@ function App() {
       }
     }
 
-    const spoken = await speaker.speak(text, { voiceURI, lang: 'en' })
-    finish(spoken)
+    try {
+      const spoken = await speaker.speak(text, { voiceURI, lang: 'en' })
+      return finish(spoken)
+    } catch (error) {
+      if (!abort.signal.aborted) setVoiceNotice(String(error?.message ?? error).slice(0, 160))
+      return finish(false)
+    }
   }, [liveVoice, speakReplies, speaker, ttsProvider, ttsKey, ttsVoice, voiceURI])
 
   const generateImageMessage = useCallback(async ({ content, subject, userMsg }) => {
@@ -1685,6 +1714,7 @@ function App() {
     const hasImages = attachments.some((attachment) => attachment.kind === 'image')
     const imageRequested = mobileChatOnly && !hasAttachments && (imageMode || isImageRequest(content))
     if (!content && !hasAttachments) return
+    if (speakReplies) void unlockSpeech()
     if (imageRequested) {
       const subject = imageRequestSubject(content)
       if (!subject) {
@@ -1943,7 +1973,7 @@ function App() {
 
         // Read the finished answer aloud when voice output is on. With several
         // replies in flight, speaking all of them at once would be unusable.
-        if (activeChatsRef.current <= 1) speakReply(acc)
+        if (activeChatsRef.current <= 1) speakReply(acc, assistantId)
       } catch (err) {
         if (err?.name === 'AbortError') {
           if (!acc) removeAssistant()
@@ -2207,7 +2237,7 @@ function App() {
     setMessages, setWorkspaceFiles, syncDesktopChanges, desktopApi, runDesktopCommand, ensureDesktopRuntime,
     // Without this, `send` kept the speakReply from the first render — whose live
     // mode was off — so the microphone never reopened after an answer.
-    speakReply,
+    speakReply, unlockSpeech,
   ])
 
   // `send` changes on every message; dictation is created once. Call through a ref
@@ -2367,6 +2397,7 @@ function App() {
     speechAbortRef.current = null
     stopCloudSpeech()
     speaker.stop()
+    setSpeakingMessageId(null)
     setVoiceNotice('Heard you — listening.')
     window.setTimeout(() => startListeningRef.current?.(), 40)
   }, [speaker, stopBargeIn])
@@ -2381,7 +2412,23 @@ function App() {
     stopCloudSpeech()
     stopBargeIn()
     speaker.stop()
+    setSpeakingMessageId(null)
+    setVoiceNotice('')
   }, [speaker, stopBargeIn])
+
+  /** A direct tap is the reliable mobile path: it opens the speech session and
+   * plays this reply even when automatic speech was blocked. */
+  const playMessage = useCallback((message, messageId) => {
+    if (!message?.content?.trim()) return
+    if (speakingMessageId === messageId) {
+      stopSpeaking()
+      return
+    }
+    void (async () => {
+      await unlockSpeech()
+      await speakReply(message.content, messageId, { force: true })
+    })()
+  }, [speakingMessageId, stopSpeaking, unlockSpeech, speakReply])
 
   // Hands-free conversation: listen, answer, speak, listen again. Switching it off
   // stops both halves, so the microphone is never left open by accident.
@@ -2395,6 +2442,7 @@ function App() {
       closeMicStream()
       return
     }
+    void unlockSpeech()
     setSpeakReplies(true)
     setLiveVoice(true)
     // Open the microphone once, up front, and keep it for the whole session.
@@ -2403,7 +2451,7 @@ function App() {
     startListening()
   }, [
     closeMicStream, ensureMicStream, liveVoice, setLiveVoice, setSpeakReplies,
-    startListening, stopBargeIn, stopListening, stopSpeaking,
+    startListening, stopBargeIn, stopListening, stopSpeaking, unlockSpeech,
   ])
 
   useEffect(() => () => {
@@ -3081,6 +3129,10 @@ function App() {
               key={m.id ?? m.ts ?? i}
               message={m}
               isStreaming={isStreaming && i === messages.length - 1 && m.role === 'assistant'}
+              isSpeaking={speakingMessageId === (m.id ?? i)}
+              onPlay={m.role === 'assistant' && m.content && !m.image
+                ? () => playMessage(m, m.id ?? i)
+                : undefined}
             />
           ))}
 
@@ -3294,6 +3346,7 @@ function App() {
                     className="h-7 w-9"
                     onClick={() => {
                       if (speakReplies) stopSpeaking()
+                      else void unlockSpeech()
                       setSpeakReplies((value) => !value)
                     }}
                     title={speakReplies ? 'Stop reading replies aloud' : 'Read replies aloud'}
@@ -3943,7 +3996,7 @@ function MessageAttachments({ attachments }) {
   )
 }
 
-function Message({ message, isStreaming }) {
+function Message({ message, isStreaming, onPlay, isSpeaking = false }) {
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
 
@@ -4006,6 +4059,18 @@ function Message({ message, isStreaming }) {
         )}
         {!isUser && message.content && !isStreaming && (
           <div className="msg-actions">
+            {onPlay && (
+              <button
+                type="button"
+                className={`msg-copy msg-play${isSpeaking ? ' is-playing' : ''}`}
+                onClick={onPlay}
+                aria-label={isSpeaking ? 'Stop reading this reply' : 'Play this reply aloud'}
+                aria-pressed={isSpeaking}
+              >
+                {isSpeaking ? <Square size={14} /> : <Volume2 size={14} />}
+                <span>{isSpeaking ? 'Stop' : 'Play aloud'}</span>
+              </button>
+            )}
             <button type="button" className="msg-copy" onClick={copyMessage} aria-label="Copy reply">
               {copied ? <Check size={14} /> : <Copy size={14} />}
               <span>{copied ? 'Copied' : 'Copy'}</span>

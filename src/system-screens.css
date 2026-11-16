@@ -1682,6 +1682,8 @@
 
   .is-mobile-chat .msg-actions {
     display: flex;
+    align-items: center;
+    gap: 0.15rem;
     margin-top: 0.35rem;
   }
 
@@ -1700,6 +1702,7 @@
   }
 
   .is-mobile-chat .msg-copy:hover { background: var(--mobile-chat-bubble); }
+  .is-mobile-chat .msg-play.is-playing { background: var(--mobile-chat-bubble); color: var(--foreground); }
 
   .is-mobile-chat .system-note {
     max-width: 100%;

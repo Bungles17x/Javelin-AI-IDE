@@ -164,6 +164,96 @@ export async function fetchSpeech(options) {
  */
 /** The clip currently being played, so an interruption can silence it mid-sentence. */
 let activeAudio = null
+let speechAudio = null
+let silentAudioUrl = null
+
+/** One shared element, so the silent unlock performed inside a tap also blesses
+ * the real clip that arrives after the network round trip. */
+function getSpeechAudio() {
+  if (speechAudio) return speechAudio
+  if (typeof Audio === 'undefined') return null
+  speechAudio = new Audio()
+  speechAudio.preload = 'auto'
+  speechAudio.setAttribute?.('playsinline', '')
+  return speechAudio
+}
+
+/** A tiny silent WAV, generated locally rather than shipped as another asset. */
+function makeSilentAudioUrl() {
+  if (silentAudioUrl) return silentAudioUrl
+  if (typeof Blob === 'undefined' || typeof URL === 'undefined' || typeof DataView === 'undefined') return null
+  const sampleRate = 8000
+  const samples = 400
+  const bytes = new Uint8Array(44 + samples)
+  const view = new DataView(bytes.buffer)
+  const ascii = (offset, value) => {
+    for (let i = 0; i < value.length; i++) bytes[offset + i] = value.charCodeAt(i)
+  }
+  const u16 = (offset, value) => view.setUint16(offset, value, true)
+  const u32 = (offset, value) => view.setUint32(offset, value, true)
+  ascii(0, 'RIFF')
+  u32(4, 36 + samples)
+  ascii(8, 'WAVE')
+  ascii(12, 'fmt ')
+  u32(16, 16)
+  u16(20, 1)
+  u16(22, 1)
+  u32(24, sampleRate)
+  u32(28, sampleRate)
+  u16(32, 1)
+  u16(34, 8)
+  ascii(36, 'data')
+  u32(40, samples)
+  bytes.fill(0x80, 44)
+  silentAudioUrl = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }))
+  return silentAudioUrl
+}
+
+/**
+ * Allow a later, async cloud clip to play on mobile. Call synchronously from a
+ * tap/click; iOS attaches the permission to this element, not to the network
+ * response that eventually supplies the audio.
+ */
+export function primeCloudSpeech() {
+  const audio = getSpeechAudio()
+  if (!audio || activeAudio === audio) return Promise.resolve(false)
+  const url = makeSilentAudioUrl()
+  if (!url) return Promise.resolve(false)
+  try {
+    audio.pause()
+    audio.currentTime = 0
+    audio.volume = 0
+    audio.src = url
+    const playback = audio.play()
+    const restore = () => {
+      try {
+        audio.pause()
+        audio.currentTime = 0
+        audio.volume = 1
+      } catch {
+        // The element is still usable even if resetting it failed.
+      }
+    }
+    if (playback?.then) {
+      return playback.then(() => {
+        restore()
+        return true
+      }).catch(() => {
+        audio.volume = 1
+        return false
+      })
+    }
+    restore()
+    return Promise.resolve(true)
+  } catch {
+    try {
+      audio.volume = 1
+    } catch {
+      // Nothing else to repair.
+    }
+    return Promise.resolve(false)
+  }
+}
 
 /** Silence cloud speech immediately. Safe when nothing is playing. */
 export function stopCloudSpeech() {
@@ -182,6 +272,8 @@ export async function speakCloud(options) {
   const chunks = chunkForSpeech(options.text)
   if (!chunks.length) return false
   const { signal } = options
+  const audio = getSpeechAudio()
+  if (!audio) throw new Error('audio playback is not available here')
 
   for (const chunk of chunks) {
     if (signal?.aborted) return false
@@ -190,20 +282,46 @@ export async function speakCloud(options) {
     const url = URL.createObjectURL(blob)
     try {
       await new Promise((resolve, reject) => {
-        const audio = new Audio(url)
-        activeAudio = audio
-        const finish = () => {
+        let settled = false
+        let onAbort
+        const cleanup = () => {
+          signal?.removeEventListener?.('abort', onAbort)
+          audio.onended = null
+          audio.onpause = null
+          audio.onerror = null
           if (activeAudio === audio) activeAudio = null
+        }
+        const finish = () => {
+          if (settled) return
+          settled = true
+          cleanup()
           resolve()
         }
-        audio.onended = finish
-        audio.onpause = () => (signal?.aborted ? reject(Object.assign(new Error('speech interrupted'), { name: 'AbortError' })) : undefined)
-        audio.onerror = () => reject(new Error('audio playback failed'))
-        signal?.addEventListener?.('abort', () => {
+        const fail = (error) => {
+          if (settled) return
+          settled = true
+          cleanup()
+          try {
+            audio.pause()
+          } catch {
+            // Already stopped.
+          }
+          reject(error)
+        }
+        onAbort = () => {
           stopCloudSpeech()
-          reject(Object.assign(new Error('speech interrupted'), { name: 'AbortError' }))
-        }, { once: true })
-        audio.play().catch(reject)
+          fail(Object.assign(new Error('speech interrupted'), { name: 'AbortError' }))
+        }
+        activeAudio = audio
+        audio.volume = 1
+        audio.src = url
+        audio.onended = finish
+        audio.onpause = () => {
+          if (signal?.aborted) fail(Object.assign(new Error('speech interrupted'), { name: 'AbortError' }))
+        }
+        audio.onerror = () => fail(new Error('audio playback failed'))
+        signal?.addEventListener?.('abort', onAbort, { once: true })
+        audio.play().catch(fail)
       })
     } finally {
       URL.revokeObjectURL(url)
