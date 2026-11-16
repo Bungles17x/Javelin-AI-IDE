@@ -52,8 +52,32 @@ jobs:
             git push origin $tag
           }
 
-      - name: Build and publish the update
-        run: npm run desktop:publish
+      - name: Build the update
+        run: npm run desktop:build
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Publish the release and update files
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          $tag = "v$env:DESKTOP_VERSION"
+          $version = $env:DESKTOP_VERSION
+          $assets = @(
+            "release/Javelin-AI-IDE-Setup-$version.exe",
+            "release/Javelin-AI-IDE-Setup-$version.exe.blockmap",
+            "release/latest.yml"
+          )
+          foreach ($asset in $assets) {
+            if (-not (Test-Path $asset)) { throw "Missing release asset: $asset" }
+          }
+          gh release view $tag --json isDraft 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Update asset upload failed.' }
+            gh release edit $tag --draft=false --latest
+          } else {
+            gh release create $tag @assets --verify-tag --latest --title "Javelin AI IDE $version" --notes "Automated desktop release."
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release publishing failed.' }
