@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  AlertCircle, Ban, CheckCircle2, Clock, EyeOff, RefreshCw, Search, ShieldCheck, Terminal, User, Users, X,
+  AlertCircle, ArrowLeft, Ban, CheckCircle2, Clock, EyeOff, MessageSquare, Paperclip, RefreshCw, Search, ShieldCheck, Terminal, User, Users, X,
 } from 'lucide-react'
 import {
-  banAccount, fetchAdminStats, fetchAdminUsers, setAccountRole, unbanAccount,
+  banAccount, fetchAdminStats, fetchAdminUserHistory, fetchAdminUsers, setAccountRole, unbanAccount,
 } from '../lib/accountAuth'
 
 const HELP = `help                         Show this command list
@@ -21,6 +21,27 @@ function shortDate(value) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return 'unknown'
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function shortDateTime(value) {
+  if (!value) return 'never'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'never'
+  return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+function formatBytes(value) {
+  const bytes = Number(value)
+  if (!Number.isFinite(bytes) || bytes <= 0) return ''
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function roleLabel(role) {
+  if (role === 'user') return 'Member'
+  if (role === 'assistant') return 'Javelin'
+  return 'System'
 }
 
 function expiryLabel(value) {
@@ -43,9 +64,26 @@ export function AdminScreen({ open, session, onClose }) {
   const [command, setCommand] = useState('')
   const [commandBusy, setCommandBusy] = useState(false)
   const [output, setOutput] = useState('')
+  const [chatUser, setChatUser] = useState(null)
+  const [chatHistory, setChatHistory] = useState(null)
+  const [chatUpdatedAt, setChatUpdatedAt] = useState(null)
+  const [chatLoading, setChatLoading] = useState(false)
+  const [chatError, setChatError] = useState('')
+  const [activeChatId, setActiveChatId] = useState('')
   const commandRef = useRef(null)
+  const chatRequestRef = useRef(0)
   const token = session?.token
   const isOwner = session?.user?.role === 'owner'
+
+  const closeChatView = useCallback(() => {
+    chatRequestRef.current += 1
+    setChatUser(null)
+    setChatHistory(null)
+    setChatUpdatedAt(null)
+    setChatLoading(false)
+    setChatError('')
+    setActiveChatId('')
+  }, [])
 
   const load = useCallback(async (nextQuery = '') => {
     if (!token) return []
@@ -75,19 +113,23 @@ export function AdminScreen({ open, session, onClose }) {
     setError('')
     setCommand('')
     setOutput('')
+    closeChatView()
     void load('')
     const timer = setTimeout(() => commandRef.current?.focus(), 80)
     return () => clearTimeout(timer)
-  }, [open, load])
+  }, [open, load, closeChatView])
 
   useEffect(() => {
     if (!open) return undefined
     const onKey = (event) => {
-      if (event.key === 'Escape' && !commandBusy) onClose()
+      if (event.key === 'Escape' && !commandBusy) {
+        if (chatUser) closeChatView()
+        else onClose()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, commandBusy, onClose])
+  }, [open, commandBusy, onClose, chatUser, closeChatView])
 
   if (!open) return null
 
@@ -190,6 +232,34 @@ export function AdminScreen({ open, session, onClose }) {
     commandRef.current?.focus()
   }
 
+  const openChatView = async (user) => {
+    const requestId = chatRequestRef.current + 1
+    chatRequestRef.current = requestId
+    setChatUser(user)
+    setChatHistory(null)
+    setChatUpdatedAt(null)
+    setChatLoading(true)
+    setChatError('')
+    setActiveChatId('')
+    try {
+      const result = await fetchAdminUserHistory(token, user.id)
+      if (requestId !== chatRequestRef.current) return
+      const history = result?.history || { conversations: [] }
+      setChatUser(result?.user || user)
+      setChatHistory(history)
+      setChatUpdatedAt(result?.updatedAt || null)
+      setActiveChatId(history.conversations?.[0]?.id || '')
+    } catch (loadError) {
+      if (requestId !== chatRequestRef.current) return
+      setChatError(loadError.message || String(loadError))
+    } finally {
+      if (requestId === chatRequestRef.current) setChatLoading(false)
+    }
+  }
+
+  const conversations = chatHistory?.conversations || []
+  const activeConversation = conversations.find((conversation) => conversation.id === activeChatId) || conversations[0] || null
+
   return (
     <div className="admin-backdrop" role="dialog" aria-modal="true" aria-labelledby="admin-title">
       <div className="admin-screen">
@@ -275,6 +345,9 @@ export function AdminScreen({ open, session, onClose }) {
                   )}
                 </div>
                 <div className="admin-user-actions">
+                  <button type="button" className="admin-action is-chat" onClick={() => void openChatView(user)} disabled={commandBusy}>
+                    <MessageSquare size={13} /> Chats
+                  </button>
                   {user.role !== 'owner' && (isOwner || user.role === 'member') && (
                     user.banned ? (
                       <button type="button" className="admin-action is-restore" onClick={() => void quickUnban(user)} disabled={commandBusy}>
@@ -319,6 +392,117 @@ export function AdminScreen({ open, session, onClose }) {
             <pre className="admin-output" aria-live="polite">{output || HELP}</pre>
           </section>
         </div>
+
+        {chatUser && (
+          <section className="admin-chat-view" aria-labelledby="admin-chat-title">
+            <header className="admin-chat-head">
+              <button type="button" className="admin-chat-back" onClick={closeChatView}>
+                <ArrowLeft size={14} /> Accounts
+              </button>
+              <div className="admin-chat-identity">
+                <div className="admin-chat-name">
+                  <strong id="admin-chat-title">{chatUser.username}</strong>
+                  <span className={`admin-role is-${chatUser.role}`}>{chatUser.role}</span>
+                  {chatUser.banned && <span className="admin-ban-badge">Banned</span>}
+                </div>
+                <small>
+                  {chatUser.email} · Joined {shortDate(chatUser.createdAt)} · Last synced {shortDateTime(chatUpdatedAt)}
+                </small>
+              </div>
+              <button type="button" className="admin-close" onClick={closeChatView} aria-label="Close chat history" title="Close chat history">
+                <X size={17} />
+              </button>
+            </header>
+
+            {chatUser.banned && (
+              <p className="admin-chat-ban">
+                <Clock size={12} /> {expiryLabel(chatUser.banExpiresAt)} · {chatUser.banReason || 'No reason provided.'}
+              </p>
+            )}
+
+            {chatLoading ? (
+              <p className="admin-chat-empty">Loading synced conversations…</p>
+            ) : chatError ? (
+              <div className="admin-chat-error" role="alert">
+                <AlertCircle size={15} />
+                <div>
+                  <strong>Could not load this account’s chats.</strong>
+                  <span>{chatError}</span>
+                  <button type="button" onClick={() => void openChatView(chatUser)}>Retry</button>
+                </div>
+              </div>
+            ) : (
+              <div className="admin-chat-layout">
+                <nav className="admin-chat-list" aria-label="Synced conversations">
+                  <div className="admin-chat-list-head">
+                    <span>Conversations</span>
+                    <small>{conversations.length}</small>
+                  </div>
+                  {conversations.length === 0 ? (
+                    <p className="admin-chat-empty">No synced conversations for this account.</p>
+                  ) : conversations.map((conversation) => (
+                    <button
+                      key={conversation.id}
+                      type="button"
+                      className={`admin-chat-item${conversation.id === activeConversation?.id ? ' is-active' : ''}`}
+                      onClick={() => setActiveChatId(conversation.id)}
+                    >
+                      <strong>{conversation.title || 'Untitled conversation'}</strong>
+                      <small>{conversation.messages.length} message{conversation.messages.length === 1 ? '' : 's'} · {shortDateTime(conversation.updatedAt)}</small>
+                    </button>
+                  ))}
+                </nav>
+
+                <div className="admin-chat-thread">
+                  {activeConversation ? (
+                    <>
+                      <div className="admin-chat-thread-head">
+                        <div>
+                          <strong>{activeConversation.title || 'Untitled conversation'}</strong>
+                          <small>{activeConversation.messages.length} message{activeConversation.messages.length === 1 ? '' : 's'} · Updated {shortDateTime(activeConversation.updatedAt)}</small>
+                        </div>
+                        <span className="admin-chat-scope">{isOwner ? 'Owner view' : 'Rank-limited view'}</span>
+                      </div>
+                      <div className="admin-chat-messages">
+                        {activeConversation.messages.length === 0 ? (
+                          <p className="admin-chat-empty">This conversation has no messages.</p>
+                        ) : activeConversation.messages.map((message, index) => (
+                          <article key={message.id || `${activeConversation.id}-${index}`} className={`admin-chat-message is-${message.role || 'system'}`}>
+                            <div className="admin-chat-meta">
+                              <span>{roleLabel(message.role)}</span>
+                              {message.ts ? <time>{shortDateTime(message.ts)}</time> : null}
+                            </div>
+                            <p>{message.content || '(empty message)'}</p>
+                            {message.attachments?.length > 0 && (
+                              <div className="admin-chat-attachments">
+                                {message.attachments.map((attachment, attachmentIndex) => (
+                                  <span key={attachment.id || `${index}-${attachmentIndex}`}>
+                                    <Paperclip size={10} /> {attachment.name || attachment.kind}
+                                    {attachment.mime ? ` · ${attachment.mime}` : ''}
+                                    {formatBytes(attachment.size) ? ` · ${formatBytes(attachment.size)}` : ''}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {message.image && (message.image.prompt || message.image.seed || message.image.status) && (
+                              <div className="admin-chat-image-meta">
+                                {message.image.status && <span>Image {message.image.status}</span>}
+                                {message.image.prompt && <span>Prompt: {message.image.prompt}</span>}
+                                {message.image.seed && <span>Seed: {message.image.seed}</span>}
+                              </div>
+                            )}
+                          </article>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="admin-chat-empty">Select a conversation to read it.</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
       </div>
     </div>
   )

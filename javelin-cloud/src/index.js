@@ -151,6 +151,21 @@ function mergeHistoryPayloads(existingValue, incomingValue) {
   }
 }
 
+async function loadChatHistory(env, userId) {
+  const row = await env.DB.prepare('SELECT payload, updated_at FROM chat_history WHERE user_id = ?')
+    .bind(userId)
+    .first()
+  let history = { version: 1, conversations: [], deleted: {} }
+  if (row?.payload) {
+    try {
+      history = normalizeHistoryDocument(JSON.parse(row.payload))
+    } catch {
+      history = { version: 1, conversations: [], deleted: {} }
+    }
+  }
+  return { history, updatedAt: Number(row?.updated_at) || null }
+}
+
 function bytesToBase64(bytes) {
   let binary = ''
   for (const byte of bytes) binary += String.fromCharCode(byte)
@@ -1165,6 +1180,22 @@ async function handleAdmin(request, env, path) {
     })
   }
 
+  if (path === '/admin/user-history') {
+    if (request.method !== 'GET') return authError('Use GET.', 'METHOD_NOT_ALLOWED', 405)
+    const identifier = new URL(request.url).searchParams.get('identifier')
+    const target = await findAdminTarget(env, identifier)
+    if (!target) return authError('That account was not found.', 'ADMIN_USER_NOT_FOUND', 404)
+    if (!canViewAccount(actor, target)) {
+      return authError('Accounts ranked above you are not visible.', 'ADMIN_RANK_RESTRICTED', 403)
+    }
+    const { history, updatedAt } = await loadChatHistory(env, target.id)
+    return json({
+      user: adminUser(target),
+      history,
+      updatedAt,
+    })
+  }
+
   if (request.method !== 'POST') return authError('Use POST.', 'METHOD_NOT_ALLOWED', 405)
   const body = await readAuthBody(request)
   if (!body) return authError('The request body must be JSON.', 'INVALID_JSON')
@@ -1453,18 +1484,8 @@ async function handleAuth(request, env, path, ctx) {
     if (!user) return authError('Your session has expired. Sign in again.', 'SESSION_EXPIRED', 401)
 
     if (request.method === 'GET') {
-      const row = await env.DB.prepare('SELECT payload, updated_at FROM chat_history WHERE user_id = ?')
-        .bind(user.id)
-        .first()
-      let history = { version: 1, conversations: [], deleted: {} }
-      if (row?.payload) {
-        try {
-          history = normalizeHistoryDocument(JSON.parse(row.payload))
-        } catch {
-          history = { version: 1, conversations: [], deleted: {} }
-        }
-      }
-      return json({ history, updatedAt: Number(row?.updated_at) || null })
+      const { history, updatedAt } = await loadChatHistory(env, user.id)
+      return json({ history, updatedAt })
     }
 
     if (request.method !== 'POST') return authError('Use GET or POST.', 'METHOD_NOT_ALLOWED', 405)

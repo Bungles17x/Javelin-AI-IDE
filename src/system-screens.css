@@ -199,6 +199,7 @@
   backdrop-filter: blur(16px);
 }
 .admin-screen {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: min(58rem, 100%);
@@ -397,6 +398,7 @@
 .admin-action { min-height: 1.85rem; padding: 0 0.55rem; }
 .admin-action.is-ban { border-color: rgba(248, 113, 113, 0.24); color: #fca5a5; }
 .admin-action.is-restore { border-color: rgba(16, 185, 129, 0.26); color: #6ee7b7; }
+.admin-action.is-chat { border-color: rgba(96, 165, 250, 0.26); color: #93c5fd; }
 .admin-command {
   display: grid;
   gap: 0.45rem;
@@ -448,6 +450,209 @@
   line-height: 1.55;
   white-space: pre-wrap;
   overflow: auto;
+}
+
+/* Rank-checked account chat view */
+.admin-chat-view {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  background: linear-gradient(150deg, #111a2d, #080e1b 72%);
+}
+.admin-chat-head {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 1rem 1.2rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(15, 23, 42, 0.72);
+}
+.admin-chat-back {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.35rem;
+  height: 1.9rem;
+  padding: 0 0.6rem;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 0.55rem;
+  background: rgba(148, 163, 184, 0.06);
+  color: #cbd5e1;
+  font-size: 0.68rem;
+  font-weight: 650;
+}
+.admin-chat-back:hover { color: #fff; border-color: rgba(96, 165, 250, 0.5); }
+.admin-chat-identity { flex: 1; min-width: 0; }
+.admin-chat-name { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; }
+.admin-chat-name strong { color: #f1f5f9; font-size: 0.9rem; }
+.admin-chat-identity small {
+  display: block;
+  margin-top: 0.12rem;
+  color: #64748b;
+  font-size: 0.62rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-chat-ban {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0.5rem 1.2rem;
+  border-bottom: 1px solid rgba(248, 113, 113, 0.16);
+  background: rgba(127, 29, 29, 0.16);
+  color: #fca5a5;
+  font-size: 0.65rem;
+}
+.admin-chat-layout {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+.admin-chat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-height: 0;
+  padding: 0.65rem;
+  border-right: 1px solid rgba(148, 163, 184, 0.12);
+  background: rgba(2, 6, 23, 0.26);
+  overflow-y: auto;
+}
+.admin-chat-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.2rem 0.3rem 0.45rem;
+  color: #94a3b8;
+  font-size: 0.6rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.admin-chat-list-head small { color: #60a5fa; font-size: 0.6rem; }
+.admin-chat-item {
+  display: grid;
+  gap: 0.18rem;
+  width: 100%;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  background: transparent;
+  text-align: left;
+}
+.admin-chat-item:hover { border-color: rgba(148, 163, 184, 0.18); background: rgba(148, 163, 184, 0.06); }
+.admin-chat-item.is-active { border-color: rgba(96, 165, 250, 0.38); background: rgba(37, 99, 235, 0.16); }
+.admin-chat-item strong {
+  color: #e2e8f0;
+  font-size: 0.7rem;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-chat-item small { color: #64748b; font-size: 0.58rem; }
+.admin-chat-thread { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.admin-chat-thread-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.7rem 0.9rem;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+}
+.admin-chat-thread-head strong { display: block; color: #f1f5f9; font-size: 0.78rem; }
+.admin-chat-thread-head small { display: block; margin-top: 0.15rem; color: #64748b; font-size: 0.6rem; }
+.admin-chat-scope {
+  flex: 0 0 auto;
+  padding: 0.16rem 0.4rem;
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.1);
+  color: #93c5fd;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.admin-chat-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem 0.9rem 1.2rem;
+  overflow-y: auto;
+}
+.admin-chat-message {
+  max-width: 92%;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.6rem;
+  background: rgba(148, 163, 184, 0.06);
+}
+.admin-chat-message.is-user { align-self: flex-end; border-color: rgba(96, 165, 250, 0.24); background: rgba(37, 99, 235, 0.11); }
+.admin-chat-message.is-assistant { align-self: flex-start; }
+.admin-chat-message.is-system { align-self: center; max-width: 100%; border-style: dashed; background: rgba(251, 191, 36, 0.05); }
+.admin-chat-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.2rem;
+  color: #64748b;
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.admin-chat-message.is-user .admin-chat-meta span { color: #93c5fd; }
+.admin-chat-message p {
+  margin: 0;
+  color: #dbe6f5;
+  font-size: 0.7rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.admin-chat-attachments { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
+.admin-chat-attachments span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.35rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.35rem;
+  color: #94a3b8;
+  font-size: 0.58rem;
+}
+.admin-chat-image-meta { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.4rem; color: #94a3b8; font-size: 0.58rem; line-height: 1.45; }
+.admin-chat-empty { margin: auto; padding: 2rem 1rem; color: #64748b; font-size: 0.72rem; text-align: center; }
+.admin-chat-error {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 1.2rem;
+  padding: 0.7rem;
+  border: 1px solid rgba(248, 113, 113, 0.28);
+  border-radius: 0.65rem;
+  background: rgba(127, 29, 29, 0.2);
+  color: #fca5a5;
+  font-size: 0.7rem;
+}
+.admin-chat-error strong { display: block; color: #fca5a5; font-size: 0.72rem; }
+.admin-chat-error span { display: block; margin-top: 0.15rem; color: #fecaca; font-size: 0.66rem; }
+.admin-chat-error button {
+  margin-top: 0.5rem;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 0.4rem;
+  background: rgba(127, 29, 29, 0.24);
+  color: #fecaca;
+  font-size: 0.62rem;
+  font-weight: 700;
 }
 
 /* Suspended-account screen */
@@ -545,6 +750,11 @@
   .admin-user-info { width: calc(100% - 2.7rem); }
   .admin-user-actions { width: 100%; justify-content: flex-start; padding-left: 2.7rem; }
   .admin-command-head small { display: none; }
+  .admin-chat-head { flex-wrap: wrap; padding: 0.8rem; }
+  .admin-chat-identity { order: 3; width: 100%; }
+  .admin-chat-layout { grid-template-columns: 1fr; grid-template-rows: 9rem minmax(0, 1fr); }
+  .admin-chat-list { border-right: 0; border-bottom: 1px solid rgba(148, 163, 184, 0.12); }
+  .admin-chat-message { max-width: 100%; }
   .ban-card { padding: 1.5rem; }
   .ban-actions { flex-direction: column; }
   .ban-secondary { height: 2.3rem; }

@@ -175,6 +175,11 @@ export async function fetchAdminStats(token) {
   return request('/admin/stats', { method: 'GET', token })
 }
 
+export async function fetchAdminUserHistory(token, identifier) {
+  const suffix = `?identifier=${encodeURIComponent(String(identifier || ''))}`
+  return request(`/admin/user-history${suffix}`, { method: 'GET', token })
+}
+
 export async function banAccount(token, { identifier, reason = '', days = 0 }) {
   return request('/admin/ban', { token, body: { identifier, reason, days } })
 }

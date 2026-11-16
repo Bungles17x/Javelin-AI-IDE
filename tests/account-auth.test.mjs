@@ -51,6 +51,7 @@ class FakeD1 {
     this.tokens = []
     this.logins = []
     this.support = []
+    this.history = []
   }
 
   prepare(sql) {
@@ -88,6 +89,9 @@ class FakeD1 {
     }
     if (/^SELECT banned_at, ban_reason, ban_expires_at FROM users WHERE id = \?$/.test(sql)) {
       return this.users.find((row) => row.id === params[0]) ?? null
+    }
+    if (/^SELECT payload, updated_at FROM chat_history WHERE user_id = \?$/.test(sql)) {
+      return this.history.find((row) => row.user_id === params[0]) ?? null
     }
     if (/^SELECT id, username, email, role, created_at, email_verified_at, banned_at, ban_reason, ban_expires_at FROM users WHERE id = \? OR username_lower = \? OR email_lower = \?$/.test(sql)) {
       return this.users.find((row) => row.id === params[0] || row.username_lower === params[1] || row.email_lower === params[2]) ?? null
@@ -616,6 +620,41 @@ const staffOwnerSearch = await call('/admin/users?query=Bungles17x', { method: '
 check('staff search cannot reveal a higher-ranked account', staffOwnerSearch.status === 200 && staffOwnerSearch.data.users?.length === 0, JSON.stringify(staffOwnerSearch.data))
 const staffStats = await call('/admin/stats', { method: 'GET', token: staffToken })
 check('staff stats only count visible accounts', staffStats.status === 200 && staffStats.data.restricted === true && staffStats.data.total === staffDirectory.data.users.length && staffStats.data.owners === undefined, JSON.stringify(staffStats.data))
+db.history.push({
+  user_id: targetSignup.data.session.user.id,
+  payload: JSON.stringify({
+    version: 1,
+    conversations: [{
+      id: 'target-chat-1',
+      title: 'Debugging the parser',
+      titleSource: 'manual',
+      createdAt: Date.now() - 60_000,
+      updatedAt: Date.now(),
+      messages: [
+        { id: 'msg-1', role: 'user', content: 'The parser breaks on nested arrays.', ts: Date.now() - 55_000 },
+        { id: 'msg-2', role: 'assistant', content: 'I found the tokenizer boundary issue.', ts: Date.now() - 50_000 },
+        {
+          id: 'msg-3',
+          role: 'user',
+          content: 'Here is the trace.',
+          ts: Date.now() - 45_000,
+          attachments: [{ id: 'att-1', kind: 'file', name: 'trace.txt', mime: 'text/plain', size: 2048 }],
+        },
+      ],
+    }],
+    deleted: {},
+  }),
+  updated_at: Date.now(),
+})
+const ownHistory = await call('/history', { method: 'GET', token: targetSignup.data.session.token })
+check('an account can still read its own synced history', ownHistory.status === 200 && ownHistory.data.history?.conversations?.[0]?.title === 'Debugging the parser', JSON.stringify(ownHistory.data))
+const staffTargetChats = await call('/admin/user-history?identifier=TargetUser', { method: 'GET', token: staffToken })
+check('staff can read a visible account\'s chat history', staffTargetChats.status === 200 && staffTargetChats.data.user?.username === 'TargetUser' && staffTargetChats.data.history?.conversations?.[0]?.messages?.[0]?.content === 'The parser breaks on nested arrays.', JSON.stringify(staffTargetChats.data))
+check('the chat history includes attachment metadata', staffTargetChats.data.history?.conversations?.[0]?.messages?.[2]?.attachments?.[0]?.name === 'trace.txt', JSON.stringify(staffTargetChats.data))
+const staffOwnerChats = await call('/admin/user-history?identifier=Bungles17x', { method: 'GET', token: staffToken })
+check('staff cannot read a higher-ranked account\'s chat history', staffOwnerChats.status === 403 && staffOwnerChats.data.error?.code === 'ADMIN_RANK_RESTRICTED', JSON.stringify(staffOwnerChats.data))
+const ownerTargetChats = await call('/admin/user-history?identifier=TargetUser', { method: 'GET', token: ownerToken })
+check('the owner can read any account\'s chat history', ownerTargetChats.status === 200 && ownerTargetChats.data.history?.conversations?.[0]?.title === 'Debugging the parser', JSON.stringify(ownerTargetChats.data))
 const staffBan = await call('/admin/ban', {
   token: staffToken,
   body: { identifier: 'TargetUser', reason: 'Staff moderation test' },
