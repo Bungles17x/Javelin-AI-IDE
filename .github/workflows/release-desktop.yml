@@ -38,6 +38,20 @@ jobs:
           npm version $version --no-git-tag-version
           "DESKTOP_VERSION=$version" >> $env:GITHUB_ENV
 
+      - name: Create the release tag
+        shell: pwsh
+        run: |
+          $tag = "v$env:DESKTOP_VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags --force
+          if (git rev-parse -q --verify "refs/tags/$tag") {
+            Write-Output "Tag $tag already exists."
+          } else {
+            git tag $tag
+            git push origin $tag
+          }
+
       - name: Build and publish the update
         run: npm run desktop:publish
         env:
