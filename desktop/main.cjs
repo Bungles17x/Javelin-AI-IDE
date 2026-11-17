@@ -26,10 +26,20 @@ let updateCheckInFlight = false
 let updateDownloading = false
 let updateDownloaded = false
 const notifiedUpdates = new Set()
-// The installed app checks once a second so a new release becomes visible
-// almost immediately. The feed is the released latest.yml directly, which
-// avoids GitHub API rate limits at this frequency.
+// Keep the update-state loop responsive without making GitHub's unauthenticated
+// release feed rate-limit the install. GitHub starts rejecting requests at one
+// per second, so the local loop runs every second and refreshes the feed at most
+// every five seconds (or after the server's Retry-After delay).
 const UPDATE_CHECK_INTERVAL_MS = 1000
+const UPDATE_FEED_REFRESH_MS = 5 * 1000
+let nextUpdateFeedCheckAt = 0
+
+function updateRetryDelayMs(error) {
+  const headers = error?.response?.headers
+  const raw = typeof headers?.get === 'function' ? headers.get('retry-after') : headers?.['retry-after']
+  const seconds = Number(raw)
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0
+}
 
 async function logUpdate(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`
@@ -664,6 +674,9 @@ function setupAutoUpdates() {
   })
   autoUpdater.on('error', (error) => {
     updateDownloading = false
+    // A 429 carries Retry-After; honor it instead of hammering GitHub.
+    const retryDelay = updateRetryDelayMs(error)
+    if (retryDelay) nextUpdateFeedCheckAt = Date.now() + retryDelay
     publishUpdateStatus({
       status: 'error',
       message: `Update check failed: ${String(error?.message ?? error)}`,
@@ -709,6 +722,9 @@ function setupAutoUpdates() {
   const check = () => {
     // Do not overlap checks or disturb a download already in progress.
     if (updateCheckInFlight || updateDownloading || updateDownloaded) return
+    const now = Date.now()
+    if (now < nextUpdateFeedCheckAt) return
+    nextUpdateFeedCheckAt = now + UPDATE_FEED_REFRESH_MS
     updateCheckInFlight = true
     // The updater emits its own error event, which is published above.
     autoUpdater.checkForUpdates()
