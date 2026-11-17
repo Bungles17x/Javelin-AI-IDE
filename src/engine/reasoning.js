@@ -7,6 +7,7 @@
  */
 
 import { sanitizeAssistantOutput } from '../core/assistantOutput.js'
+import { renderModelIdentity } from '../core/identity.js'
 
 /** Phases surfaced to the UI so the user can see what the agent is doing. */
 export const PHASE = {
@@ -47,7 +48,10 @@ export function noActionNudge(repeated) {
   )
 }
 
-export const AGENT_SYSTEM_PROMPT = `You are Javelin AI, an autonomous coding agent working inside a user's project. You do not just answer questions — you inspect the codebase, plan, make edits, run tests, and fix your own mistakes.
+export const AGENT_SYSTEM_PROMPT = `${renderModelIdentity()}
+
+AGENT MODE
+You are working inside a user's project. You do not just answer questions — you inspect the codebase, plan, make edits, run tests, and fix your own mistakes.
 
 Operating rules:
 1. INVESTIGATE BEFORE EDITING. You must call list_files / read_file / search_code to understand the relevant code before you change anything. Never invent file paths — verify they exist.
