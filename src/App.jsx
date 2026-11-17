@@ -1050,7 +1050,8 @@ function App() {
     if (!desktopApi?.installUpdate || updateInstalling) return
     setUpdateInstalling(true)
     try {
-      await desktopApi.installUpdate()
+      const result = await desktopApi.installUpdate()
+      if (!result?.ok) setUpdateInstalling(false)
     } catch {
       setUpdateInstalling(false)
     }
@@ -3087,12 +3088,18 @@ function App() {
             <Download className="mt-0.5 h-4 w-4 shrink-0" />
             <div className="min-w-0 flex-1">
               <p className="font-medium">
-                {outdatedUpdate.status === 'downloaded' ? 'Update ready to install' : 'You are using an outdated version'}
+                {outdatedUpdate.urgent
+                  ? 'Some features may not work, update now'
+                  : outdatedUpdate.status === 'downloaded'
+                    ? 'Update ready to install'
+                    : 'You are using an outdated version'}
               </p>
               <p className="mt-0.5 text-xs opacity-90">
-                {outdatedUpdate.status === 'downloaded'
-                  ? `Javelin AI IDE ${outdatedUpdate.version} is ready. Restart to install the update.`
-                  : `You are on ${outdatedUpdate.currentVersion}. Version ${outdatedUpdate.version} is downloading now.`}
+                {outdatedUpdate.urgent
+                  ? `You are on ${outdatedUpdate.currentVersion}, ${outdatedUpdate.releasesBehind}+ releases behind.${outdatedUpdate.status === 'downloaded' ? ` Restart and update to ${outdatedUpdate.version} now.` : ` Version ${outdatedUpdate.version} is downloading now.`}`
+                  : outdatedUpdate.status === 'downloaded'
+                    ? `Javelin AI IDE ${outdatedUpdate.version} is ready. Restart to install the update.`
+                    : `You are on ${outdatedUpdate.currentVersion}. Version ${outdatedUpdate.version} is downloading now.`}
               </p>
             </div>
             {outdatedUpdate.status === 'downloaded' ? (
@@ -3103,7 +3110,7 @@ function App() {
                 disabled={updateInstalling}
                 onClick={() => void installDesktopUpdate()}
               >
-                {updateInstalling ? 'Restarting…' : 'Restart to update'}
+                {updateInstalling ? 'Restarting…' : outdatedUpdate.urgent ? 'Restart and update' : 'Restart to update'}
               </Button>
             ) : (
               <span className="shrink-0 whitespace-nowrap text-xs font-medium">Downloading…</span>

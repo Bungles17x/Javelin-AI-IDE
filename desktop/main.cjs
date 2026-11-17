@@ -25,6 +25,8 @@ let lastUpdateStatus = null
 let updateCheckInFlight = false
 let updateDownloading = false
 let updateDownloaded = false
+let downloadedUpdateVersion = null
+let downloadedUpdateUrgent = false
 const notifiedUpdates = new Set()
 // Keep the update-state loop responsive without making GitHub's unauthenticated
 // release feed rate-limit the install. GitHub starts rejecting requests at one
@@ -41,6 +43,23 @@ function updateRetryDelayMs(error) {
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0
 }
 
+function versionParts(value) {
+  const match = String(value || '').match(/(\d+)\.(\d+)\.(\d+)/)
+  return match ? { major: Number(match[1]), minor: Number(match[2]), patch: Number(match[3]) } : null
+}
+
+function releaseGap(currentVersion, latestVersion) {
+  const current = versionParts(currentVersion)
+  const latest = versionParts(latestVersion)
+  if (!current || !latest) return { releases: 0, urgent: false }
+  if (latest.major !== current.major || latest.minor !== current.minor) {
+    // A major/minor jump is a larger change than a patch release.
+    return { releases: 5, urgent: true }
+  }
+  const releases = Math.max(0, latest.patch - current.patch)
+  return { releases, urgent: releases >= 5 }
+}
+
 async function logUpdate(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`
   console.log(line.trim())
@@ -52,11 +71,16 @@ async function logUpdate(message) {
 }
 
 function publishUpdateStatus(status) {
+  const gap = status.version
+    ? releaseGap(app.getVersion(), status.version)
+    : { releases: 0, urgent: false }
   const next = {
     currentVersion: app.getVersion(),
     version: null,
     message: '',
     ...status,
+    releasesBehind: gap.releases,
+    urgent: gap.urgent,
     at: Date.now(),
   }
   const previous = lastUpdateStatus
@@ -89,6 +113,32 @@ function showUpdateNotification(title, body, key) {
     notification.show()
   } catch (error) {
     void logUpdate(`Could not show update notification: ${String(error?.message ?? error)}`)
+  }
+}
+
+async function askToInstallUpdate(version, urgent = false) {
+  if (updateDialogOpen) return false
+  updateDialogOpen = true
+  try {
+    const result = await dialog.showMessageBox({
+      type: urgent ? 'warning' : 'info',
+      title: urgent ? 'Update now' : 'Confirm update',
+      message: urgent ? 'Some features may not work, update now' : `Restart Javelin AI IDE ${version}?`,
+      detail: urgent
+        ? `Version ${version} is ready. Restart and update now to fix missing features. Your chats and projects stay on this computer.`
+        : `Version ${version} is ready. Restart Javelin AI IDE to apply the update? Your chats and projects stay on this computer.`,
+      buttons: ['Restart and update', 'Not now'],
+      // Require an explicit confirmation; Enter must not restart by accident.
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+    })
+    return result.response === 0
+  } catch (error) {
+    await logUpdate(`Could not show the update prompt: ${String(error?.message ?? error)}`)
+    return false
+  } finally {
+    updateDialogOpen = false
   }
 }
 
@@ -622,7 +672,8 @@ function createWindow(rendererUrl) {
 function setupAutoUpdates() {
   if (!app.isPackaged) return
   autoUpdater.autoDownload = true
-  autoUpdater.autoInstallOnAppQuit = true
+  // Never install on quit: the user must explicitly confirm the restart.
+  autoUpdater.autoInstallOnAppQuit = false
   autoUpdater.allowPrerelease = false
   // A per-user NSIS package would otherwise default to %LOCALAPPDATA% and
   // create a second install. Pin the update to the directory this copy runs
@@ -639,10 +690,14 @@ function setupAutoUpdates() {
     status: 'checking',
     currentVersion: app.getVersion(),
     version: null,
+    releasesBehind: 0,
+    urgent: false,
     message: 'Checking for updates.',
   })
-  ipcMain.handle('updates:install', () => {
+  ipcMain.handle('updates:install', async () => {
     if (!updateDownloaded) return { ok: false, reason: 'not-downloaded' }
+    const confirmed = await askToInstallUpdate(downloadedUpdateVersion, downloadedUpdateUrgent)
+    if (!confirmed) return { ok: false, reason: 'cancelled' }
     setTimeout(() => autoUpdater.quitAndInstall(true, true), 100)
     return { ok: true }
   })
@@ -653,14 +708,17 @@ function setupAutoUpdates() {
   autoUpdater.on('update-available', (info) => {
     updateDownloading = true
     const currentVersion = app.getVersion()
+    const gap = releaseGap(currentVersion, info.version)
     publishUpdateStatus({
       status: 'available',
       version: info.version,
       message: `Update ${info.version} available; downloading.`,
     })
     showUpdateNotification(
-      'Javelin update required',
-      `You are using Javelin AI IDE ${currentVersion}, which is outdated. Version ${info.version} is downloading now.`,
+      gap.urgent ? 'Some features may not work, update now' : 'Javelin update required',
+      gap.urgent
+        ? `You are on Javelin AI IDE ${currentVersion}, ${gap.releases}+ releases behind. Some features may not work, update now.`
+        : `You are using Javelin AI IDE ${currentVersion}, which is outdated. Version ${info.version} is downloading now.`,
       `available:${info.version}`,
     )
   })
@@ -685,38 +743,22 @@ function setupAutoUpdates() {
   autoUpdater.on('update-downloaded', async (info) => {
     updateDownloading = false
     updateDownloaded = true
+    downloadedUpdateVersion = info.version
+    downloadedUpdateUrgent = releaseGap(app.getVersion(), info.version).urgent
     publishUpdateStatus({
       status: 'downloaded',
       version: info.version,
       message: `Update ${info.version} downloaded and ready to install.`,
     })
     showUpdateNotification(
-      'Javelin update ready',
-      `Javelin AI IDE ${info.version} is ready. Restart the app to install the update.`,
+      downloadedUpdateUrgent ? 'Some features may not work, update now' : 'Javelin update ready',
+      downloadedUpdateUrgent
+        ? `Javelin AI IDE ${info.version} is ready. Some features may not work until you restart and update.`
+        : `Javelin AI IDE ${info.version} is ready. Restart the app to install the update.`,
       `downloaded:${info.version}`,
     )
-    if (updateDialogOpen) return
-    updateDialogOpen = true
-    try {
-      const result = await dialog.showMessageBox({
-        type: 'info',
-        title: 'Javelin update ready',
-        message: `Javelin AI IDE ${info.version} is ready.`,
-        detail: 'Restart once to apply the update. Your chats and projects stay on this computer.',
-        buttons: ['Restart now', 'Later'],
-        defaultId: 0,
-        cancelId: 1,
-        noLink: true,
-      })
-      if (result.response === 0) {
-        // Silent install keeps the update to one click; NSIS relaunches the app.
-        setTimeout(() => autoUpdater.quitAndInstall(true, true), 100)
-      }
-    } catch (error) {
-      await logUpdate(`Could not show the update prompt: ${String(error?.message ?? error)}`)
-    } finally {
-      updateDialogOpen = false
-    }
+    const confirmed = await askToInstallUpdate(info.version, downloadedUpdateUrgent)
+    if (confirmed) setTimeout(() => autoUpdater.quitAndInstall(true, true), 100)
   })
 
   const check = () => {
