@@ -543,6 +543,7 @@ function App() {
   const [runtimeError, setRuntimeError] = useState('')
   const [updateStatus, setUpdateStatus] = useState(null)
   const [updateInstalling, setUpdateInstalling] = useState(false)
+  const [appVersion, setAppVersion] = useState('')
   // How much Javelin may do without stopping to ask. 'ask' is the default.
   const [autonomy, setAutonomy] = useLocalStorage(STORAGE.autonomy, 'ask')
 
@@ -1034,6 +1035,15 @@ function App() {
       active = false
       unsubscribe?.()
     }
+  }, [desktopApi])
+
+  useEffect(() => {
+    if (!desktopApi?.getAppVersion) return undefined
+    let active = true
+    desktopApi.getAppVersion()
+      .then((version) => { if (active && version) setAppVersion(String(version)) })
+      .catch(() => {})
+    return () => { active = false }
   }, [desktopApi])
 
   const installDesktopUpdate = useCallback(async () => {
@@ -2785,6 +2795,7 @@ function App() {
     >
       <ChatSidebar
         desktopApi={Boolean(desktopApi)}
+        appVersion={appVersion}
         codeView={showDesktopCode}
         project={desktopProject}
         onShowChat={() => setDesktopView('chat')}
@@ -2817,6 +2828,7 @@ function App() {
       />
       {desktopApi && showDesktopCode && (
         <ProjectWorkbench
+          appVersion={appVersion}
           project={desktopProject}
           projectFiles={desktopProject?.files ?? []}
           projectDirectories={desktopProject?.directories ?? []}
@@ -3796,6 +3808,7 @@ function GeneratedImage({ image }) {
 
 function ChatSidebar({
   desktopApi,
+  appVersion,
   codeView,
   project,
   onShowChat,
@@ -3936,6 +3949,11 @@ function ChatSidebar({
           <LifeBuoy size={17} />
           <span>Support</span>
         </button>
+        {appVersion && (
+          <div className="javelin-gpt-version" title={`Javelin AI IDE version ${appVersion}`}>
+            Javelin AI IDE v{appVersion}
+          </div>
+        )}
       </div>
     </aside>
   )

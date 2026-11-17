@@ -240,6 +240,7 @@ button.editor-crumb:hover { background: rgba(255, 255, 255, .08); color: var(--i
 .editor-font-controls button { display: inline-grid; width: 16px; height: 15px; place-items: center; padding: 0; border: 0; border-radius: 3px; background: rgba(0, 0, 0, .16); color: #d3dfb2; font: 11px/1 'Cascadia Code', Consolas, monospace; cursor: pointer; }
 .editor-font-controls button:hover { background: rgba(0, 0, 0, .3); color: #f1f7d8; }
 .editor-font-controls > span { min-width: 25px; text-align: center; }
+.editor-version { flex: 0 0 auto; color: #aebd98; font: 9px 'Cascadia Code', Consolas, monospace; opacity: .85; }
 .statusbar-diagnostics { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; }
 .statusbar-diagnostics button { display: inline-flex; align-items: center; gap: 3px; padding: 1px 4px; border: 0; border-radius: 3px; background: rgba(0, 0, 0, .16); color: #d3dfb2; font: inherit; cursor: pointer; }
 .statusbar-diagnostics button:hover { background: rgba(0, 0, 0, .3); color: #f1f7d8; }

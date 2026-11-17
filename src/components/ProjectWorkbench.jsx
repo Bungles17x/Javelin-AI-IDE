@@ -228,7 +228,7 @@ function TreeBranch({ node, depth, expanded, onToggle, onSelect, onDelete, onCon
   )
 }
 
-export function ProjectWorkbench({ project, projectFiles = [], projectDirectories = [], contents = {}, commandOutput = [], model, runtimeStatus, runtimeBusy, runtimeError, onOpenProject, onCreateWorkspace, onSaveFile, onRenameFile, onDeleteFile, onCreateFolder, onRunCommand, onStartOllama, onRefreshRuntime }) {
+export function ProjectWorkbench({ appVersion, project, projectFiles = [], projectDirectories = [], contents = {}, commandOutput = [], model, runtimeStatus, runtimeBusy, runtimeError, onOpenProject, onCreateWorkspace, onSaveFile, onRenameFile, onDeleteFile, onCreateFolder, onRunCommand, onStartOllama, onRefreshRuntime }) {
   const [activeFile, setActiveFile] = useState('')
   const [openFiles, setOpenFiles] = useState([])
   const [fileDrafts, setFileDrafts] = useState({})
@@ -2226,6 +2226,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
               <span>{fontSize}px</span>
               <button type="button" title="Increase editor font size" aria-label="Increase editor font size" onClick={() => setFontSize((size) => Math.min(EDITOR_FONT_MAX, size + 1))}>+</button>
             </span>
+            {appVersion && <span className="editor-version" title="Javelin AI IDE version">v{appVersion}</span>}
           </div>
         </footer>
       </main>

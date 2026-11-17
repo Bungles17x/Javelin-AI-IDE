@@ -737,6 +737,7 @@ function setupAutoUpdates() {
 
 app.setName('Javelin AI IDE')
 if (process.platform === 'win32') app.setAppUserModelId('ai.javelin.ide')
+ipcMain.handle('app:get-version', () => app.getVersion())
 
 // On some Windows setups Electron's media capture stalls forever instead of rejecting:
 // the request is neither granted nor denied. A hard timeout turns that silence into a

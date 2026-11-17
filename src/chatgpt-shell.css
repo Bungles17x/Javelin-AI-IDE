@@ -488,6 +488,15 @@ html.dark .javelin-desktop-layout.is-chat-view .javelin-assistant-column {
 
 .javelin-gpt-account { min-height: 48px !important; }
 
+.javelin-gpt-version {
+  padding: 4px 10px 1px;
+  color: var(--gpt-muted);
+  font: 9px/1.4 'Cascadia Code', Consolas, monospace;
+  letter-spacing: .02em;
+  text-align: left;
+  user-select: text;
+}
+
 .javelin-gpt-avatar {
   display: grid;
   width: 27px;
@@ -672,6 +681,7 @@ html.dark .javelin-desktop-layout.is-chat-view .javelin-assistant-column {
   color: var(--ide-accent);
   box-shadow: inset 2px 0 0 var(--ide-accent);
 }
+.javelin-desktop-layout.is-code-view .javelin-gpt-version { display: none; }
 .javelin-desktop-layout.is-code-view .javelin-gpt-footer { align-items: center; }
 .javelin-desktop-layout.is-code-view .javelin-gpt-avatar { width: 25px; height: 25px; background: #29352a; color: var(--ide-accent); }
 
