@@ -417,7 +417,10 @@ ipcMain.handle('debug:start', async (event, config) => {
   if (!workspaceRoot) throw new Error('Open a project folder before debugging.')
   if (!config || typeof config !== 'object') throw new Error('Invalid debug configuration.')
   const program = await resolveDebugPath(config.program)
-  const cwd = config.cwd ? await resolveDebugPath(config.cwd, { directory: true }) : workspaceRoot
+  const requestedCwd = typeof config.cwd === 'string' ? config.cwd.trim().replace(/\\/g, '/').replace(/\/+$/, '') : ''
+  const cwd = requestedCwd && requestedCwd !== '.'
+    ? await resolveDebugPath(config.cwd, { directory: true })
+    : workspaceRoot
   if (!['.js', '.mjs', '.cjs'].includes(path.extname(program).toLowerCase())) {
     throw new Error('The Javelin debugger currently launches JavaScript Node programs (.js, .mjs, .cjs).')
   }

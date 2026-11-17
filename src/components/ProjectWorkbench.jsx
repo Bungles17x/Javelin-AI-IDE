@@ -1320,7 +1320,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
         if (debugClientRef.current === client) debugClientRef.current = null
         setPausedFrame(null)
         setCallStack([])
-        setDebugStatus((status) => status === 'stopped' ? status : 'stopped')
+        setDebugStatus((status) => status === 'stopped' || status === 'error' ? status : 'stopped')
       },
     })
     debugClientRef.current = client
