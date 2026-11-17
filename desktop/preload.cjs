@@ -24,4 +24,21 @@ contextBridge.exposeInMainWorld('javelinDesktop', Object.freeze({
       ipcRenderer.removeListener('workspace:command-output', receiveOutput)
     }
   },
+  startDebug: (config) => ipcRenderer.invoke('debug:start', config),
+  stopDebug: (id) => ipcRenderer.invoke('debug:stop', id),
+  onDebugOutput: (callback) => {
+    const listener = (_event, id, stream, text) => callback({ id, stream, text })
+    ipcRenderer.on('debug:output', listener)
+    return () => ipcRenderer.removeListener('debug:output', listener)
+  },
+  onDebugReady: (callback) => {
+    const listener = (_event, id, wsUrl) => callback({ id, wsUrl })
+    ipcRenderer.on('debug:ready', listener)
+    return () => ipcRenderer.removeListener('debug:ready', listener)
+  },
+  onDebugExit: (callback) => {
+    const listener = (_event, id, exitCode) => callback({ id, exitCode })
+    ipcRenderer.on('debug:exit', listener)
+    return () => ipcRenderer.removeListener('debug:exit', listener)
+  },
 }))

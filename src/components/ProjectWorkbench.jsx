@@ -1,7 +1,10 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, ChevronsDownUp, ChevronsUpDown, Columns2, Copy, Eye, EyeOff, FilePlus2, Files, FolderOpen, FolderPlus, GitBranch, Minus, PanelLeftClose, PanelLeftOpen, Pencil, Play, Plus, RotateCcw, Save, Search, Settings, Sparkles, Square, Terminal, Trash2, WrapText, X } from 'lucide-react'
+import { AlertCircle, AlertTriangle, Bug, ChevronDown, ChevronRight, ChevronUp, Circle, Info, Minus, Pause, Play, Plus, RotateCcw, Save, Search, Settings, SkipForward, Sparkles, Square, Terminal, Trash2, WrapText, X, Bot, ChevronsDownUp, ChevronsUpDown, Columns2, Copy, Eye, EyeOff, FilePlus2, Files, FolderOpen, FolderPlus, GitBranch, PanelLeftClose, PanelLeftOpen, Pencil } from 'lucide-react'
 import FileTypeIcon from './FileTypeIcon.jsx'
 import { Markdown } from './Markdown.jsx'
+import { editorDiagnostics, mergeProblems, parseProblems, summarizeProblems } from '../lib/diagnostics.js'
+import { buildDebugConfigurations, debugRunCommand, defaultLaunchJson, isDebuggableFile, relativePathFromUrl } from '../lib/debugConfig.js'
+import { NodeInspectorClient } from '../lib/nodeInspector.js'
 
 const EXPLORER_MIN_WIDTH = 180
 const EXPLORER_MAX_WIDTH = 360
@@ -90,6 +93,28 @@ const JAVELIN_EDITOR_THEME = {
 
 function defineJavelinTheme(monaco) {
   monaco.editor.defineTheme('javelin-dark', JAVELIN_EDITOR_THEME)
+}
+
+function languageForPath(path) {
+  const extension = String(path ?? '').split('.').pop()?.toLowerCase()
+  return LANGUAGE_BY_EXTENSION[extension] || 'plaintext'
+}
+
+function debugLineKind(stream, text) {
+  if (stream === 'stderr') return 'error'
+  if (/\b(warn|warning)\b/i.test(text)) return 'warning'
+  return 'output'
+}
+
+function formatCallFrame(frame) {
+  return {
+    id: frame.callFrameId,
+    functionName: frame.functionName || '(anonymous)',
+    url: frame.url || '',
+    line: (frame.location?.lineNumber ?? 0) + 1,
+    column: (frame.location?.columnNumber ?? 0) + 1,
+    scopeChain: frame.scopeChain ?? [],
+  }
 }
 
 function makeTree(files, directories = []) {
@@ -217,6 +242,20 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   const [consoleInput, setConsoleInput] = useState('')
   const [consoleBusy, setConsoleBusy] = useState(false)
   const [consoleLines, setConsoleLines] = useState([])
+  const [panelTab, setPanelTab] = useState('terminal')
+  const [problemFilter, setProblemFilter] = useState('all')
+  const [liveProblems, setLiveProblems] = useState([])
+  const [commandProblems, setCommandProblems] = useState([])
+  const [breakpoints, setBreakpoints] = useState([])
+  const [selectedDebugConfig, setSelectedDebugConfig] = useState('')
+  const [debugSession, setDebugSession] = useState(null)
+  const [debugStatus, setDebugStatus] = useState('idle')
+  const [debugLines, setDebugLines] = useState([])
+  const [debugConsoleInput, setDebugConsoleInput] = useState('')
+  const [pausedFrame, setPausedFrame] = useState(null)
+  const [callStack, setCallStack] = useState([])
+  const [debugError, setDebugError] = useState('')
+  const [editorMount, setEditorMount] = useState(0)
   const [createType, setCreateType] = useState('')
   const [createPath, setCreatePath] = useState('')
   const [error, setError] = useState('')
@@ -280,6 +319,18 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   const contextMenuRef = useRef(null)
   const consoleAbortRef = useRef(null)
   const historyDraftRef = useRef('')
+  const monacoRef = useRef(null)
+  const debugClientRef = useRef(null)
+  const debugSessionRef = useRef(null)
+  const debugOutputRef = useRef('')
+  const openFileAtRef = useRef(null)
+  const activeFileRef = useRef('')
+  const breakpointsRef = useRef([])
+  const decorationIdsRef = useRef([])
+  const projectRootRef = useRef(project?.root ?? '')
+  const debugRunAbortRef = useRef(null)
+  const debugStartTokenRef = useRef(0)
+  const debugPausedRef = useRef(false)
 
   const filteredFiles = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -297,6 +348,28 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   const splitOpen = Boolean(secondaryFile)
   const markdownActive = extension === 'md' || extension === 'mdx'
   const allDirectories = useMemo(() => [...new Set(projectDirectories)].sort(), [projectDirectories])
+  const debugConfigs = useMemo(() => buildDebugConfigurations(contents, { activeFile }), [contents, activeFile])
+  const selectedDebug = debugConfigs.find((config) => config.id === selectedDebugConfig) ?? debugConfigs[0] ?? null
+  const problems = useMemo(() => {
+    const known = new Set(projectFiles.map((file) => file.path))
+    return mergeProblems(liveProblems, commandProblems)
+      .filter((problem) => !problem.path || known.has(problem.path))
+  }, [liveProblems, commandProblems, projectFiles])
+  const problemSummary = useMemo(() => summarizeProblems(problems), [problems])
+  const visibleProblems = useMemo(() => problems.filter((problem) => {
+    if (problemFilter === 'errors') return problem.severity === 'error'
+    if (problemFilter === 'warnings') return problem.severity === 'warning'
+    return true
+  }), [problems, problemFilter])
+  const problemGroups = useMemo(() => {
+    const groups = new Map()
+    for (const problem of visibleProblems) {
+      const key = problem.path || '(project)'
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(problem)
+    }
+    return [...groups.entries()]
+  }, [visibleProblems])
 
   function rememberRecent(path) {
     setRecentFiles((previous) => [path, ...previous.filter((entry) => entry !== path)].slice(0, 8))
@@ -318,7 +391,10 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   }
 
   useEffect(() => {
-    if (commandOutput.length) setConsoleOpen(true)
+    if (commandOutput.length) {
+      setConsoleOpen(true)
+      setPanelTab('terminal')
+    }
   }, [commandOutput.length])
 
   useEffect(() => {
@@ -910,6 +986,10 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
         type: result.exitCode === 0 ? 'success' : 'error',
         text: `${output || '(no output)'}\nexit code: ${result.exitCode}`,
       }].slice(-50))
+      setCommandProblems(parseProblems(output, {
+        defaultPath: activeFileRef.current,
+        root: projectRootRef.current,
+      }))
     } catch (commandError) {
       setConsoleLines((previous) => [...previous, {
         type: 'error',
@@ -963,10 +1043,11 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     // File-name filtering and content search are different queries; do not carry
     // one into the other and leave the user staring at "No matching files".
     if (view !== activityView && (view === 'search' || activityView === 'search')) setSearch('')
-    if (view === 'explorer' || view === 'search' || view === 'source') setExplorerCollapsed(false)
+    if (view === 'explorer' || view === 'search' || view === 'source' || view === 'debug') setExplorerCollapsed(false)
     setActivityView(view)
     if (view === 'search') searchInputRef.current?.focus()
-    if (view === 'run') setConsoleOpen(true)
+    if (view === 'run') { setConsoleOpen(true); setPanelTab('terminal') }
+    if (view === 'debug') { setConsoleOpen(true); setPanelTab('debug') }
     if (view === 'assistant') window.dispatchEvent(new Event('javelin:focus-assistant'))
     if (view === 'settings') window.dispatchEvent(new Event('javelin:open-settings'))
     if (view === 'source' && project) {
@@ -1010,15 +1091,22 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     { label: 'Expand All Folders', icon: ChevronsUpDown, action: () => setExpanded(new Set(allDirectories)) },
     { label: 'Collapse All Folders', icon: ChevronsDownUp, action: () => setExpanded(new Set()) },
     { label: 'Toggle Terminal Panel', icon: Terminal, action: () => setConsoleOpen((open) => !open) },
+    { label: 'Show Problems', icon: AlertTriangle, action: () => { setPanelTab('problems'); setConsoleOpen(true) } },
+    { label: 'Run and Debug', icon: Bug, action: () => void openActivityView('debug') },
     { label: 'Clear Terminal Output', icon: Trash2, action: () => setConsoleLines([]) },
     { label: 'Focus Javelin Assistant', icon: Bot, action: () => window.dispatchEvent(new Event('javelin:focus-assistant')) },
     { label: 'Open Javelin Settings', icon: Settings, action: () => window.dispatchEvent(new Event('javelin:open-settings')) },
     { label: 'Run Project Tests', icon: Play, action: () => {
       setConsoleOpen(true)
-      void onRunCommand('npm test').then((result) => setConsoleLines((previous) => [...previous, {
-        type: result.exitCode === 0 ? 'success' : 'error',
-        text: `${result.stdout || ''}${result.stderr || ''}\nexit code: ${result.exitCode}`,
-      }].slice(-50))).catch((commandError) => setConsoleLines((previous) => [...previous, { type: 'error', text: commandError.message || String(commandError) }].slice(-50)))
+      setPanelTab('terminal')
+      void onRunCommand('npm test').then((result) => {
+        const output = `${result.stdout || ''}${result.stderr || ''}`
+        setConsoleLines((previous) => [...previous, {
+          type: result.exitCode === 0 ? 'success' : 'error',
+          text: `${output}\nexit code: ${result.exitCode}`,
+        }].slice(-50))
+        setCommandProblems(parseProblems(output, { defaultPath: activeFileRef.current, root: projectRootRef.current }))
+      }).catch((commandError) => setConsoleLines((previous) => [...previous, { type: 'error', text: commandError.message || String(commandError) }].slice(-50)))
     } },
   ]
   const normalizedPaletteQuery = paletteQuery.replace(/^>\s*/, '').toLowerCase()
@@ -1057,6 +1145,424 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     document.body.classList.add('is-resizing')
   }
 
+  useEffect(() => {
+    activeFileRef.current = activeFile
+    projectRootRef.current = project?.root ?? ''
+  }, [activeFile, project?.root])
+
+  useEffect(() => {
+    breakpointsRef.current = breakpoints
+  }, [breakpoints])
+
+  useEffect(() => {
+    openFileAtRef.current = openFileAt
+  }, [openFileAt])
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const next = []
+      for (const path of openFiles) {
+        const text = fileDrafts[path] ?? contents[path] ?? ''
+        next.push(...editorDiagnostics(languageForPath(path), text, path))
+      }
+      setLiveProblems(next)
+    }, 220)
+    return () => clearTimeout(timer)
+  }, [openFiles, fileDrafts, contents])
+
+  useEffect(() => {
+    setCommandProblems([])
+    setLiveProblems([])
+    setDebugLines([])
+    setDebugError('')
+    setBreakpoints([])
+    setPausedFrame(null)
+    setCallStack([])
+    setDebugStatus('idle')
+  }, [project?.root])
+
+  useEffect(() => {
+    if (!commandOutput.length) return
+    const latest = commandOutput[commandOutput.length - 1]
+    setCommandProblems(parseProblems(latest.text, {
+      defaultPath: activeFileRef.current,
+      root: projectRootRef.current,
+    }))
+  }, [commandOutput])
+
+  useEffect(() => {
+    const monaco = monacoRef.current
+    if (!monaco) return
+    const apply = (editor, path) => {
+      const model = editor?.getModel()
+      if (!model || !path) return
+      const list = problems.filter((problem) => problem.path === path)
+      monaco.editor.setModelMarkers(model, 'javelin-problems', list.map((problem) => ({
+        severity: problem.severity === 'error'
+          ? monaco.MarkerSeverity.Error
+          : problem.severity === 'warning'
+            ? monaco.MarkerSeverity.Warning
+            : monaco.MarkerSeverity.Info,
+        message: `${problem.message}${problem.code ? ` (${problem.code})` : ''}`,
+        source: problem.source,
+        startLineNumber: Math.min(problem.line, model.getLineCount()),
+        endLineNumber: Math.min(problem.line, model.getLineCount()),
+        startColumn: Math.max(1, Math.min(problem.column, model.getLineMaxColumn(Math.min(problem.line, model.getLineCount())))),
+        endColumn: Math.max(1, model.getLineMaxColumn(Math.min(problem.line, model.getLineCount()))),
+      })))
+    }
+    apply(editorRef.current, activeFile)
+    apply(secondaryEditorRef.current, secondaryFile)
+  }, [problems, activeFile, secondaryFile, editorMount])
+
+  useEffect(() => {
+    decorationIdsRef.current = []
+  }, [activeFile])
+
+  useEffect(() => {
+    const monaco = monacoRef.current
+    const editor = editorRef.current
+    if (!monaco || !editor) return
+    const decorations = breakpoints
+      .filter((breakpoint) => breakpoint.path === activeFile)
+      .map((breakpoint) => ({
+        range: new monaco.Range(breakpoint.line, 1, breakpoint.line, 1),
+        options: {
+          isWholeLine: false,
+          glyphMarginClassName: 'debug-breakpoint-glyph',
+          linesDecorationsClassName: 'debug-breakpoint-line',
+        },
+      }))
+    if (pausedFrame?.path === activeFile && pausedFrame.line) {
+      decorations.push({
+        range: new monaco.Range(pausedFrame.line, 1, pausedFrame.line, 1),
+        options: { isWholeLine: true, className: 'debug-paused-line', glyphMarginClassName: 'debug-paused-glyph' },
+      })
+    }
+    decorationIdsRef.current = editor.deltaDecorations(decorationIdsRef.current, decorations)
+  }, [breakpoints, activeFile, pausedFrame, editorMount])
+
+  useEffect(() => {
+    if (!debugClientRef.current || debugStatus === 'idle' || debugStatus === 'stopped') return
+    void debugClientRef.current.setBreakpoints(breakpoints, projectRootRef.current)
+  }, [breakpoints, debugStatus])
+
+  useEffect(() => {
+    const api = window.javelinDesktop
+    if (!api?.onDebugOutput) return undefined
+    const offOutput = api.onDebugOutput(({ id, stream, text }) => {
+      if (id !== debugSessionRef.current?.id) return
+      debugOutputRef.current = `${debugOutputRef.current}${text}`.slice(-40_000)
+      setDebugLines((previous) => [...previous, { type: debugLineKind(stream, text), text }].slice(-600))
+      const parsed = parseProblems(debugOutputRef.current, {
+        defaultPath: activeFileRef.current,
+        root: projectRootRef.current,
+      })
+      if (parsed.length) setCommandProblems((previous) => mergeProblems(previous, parsed))
+    })
+    const offReady = api.onDebugReady(({ id, wsUrl }) => {
+      if (id !== debugSessionRef.current?.id) return
+      void connectDebugger(wsUrl)
+    })
+    const offExit = api.onDebugExit(({ id, exitCode }) => {
+      if (id !== debugSessionRef.current?.id) return
+      debugPausedRef.current = false
+      debugClientRef.current?.close()
+      debugClientRef.current = null
+      debugSessionRef.current = null
+      setDebugSession(null)
+      setPausedFrame(null)
+      setCallStack([])
+      setDebugStatus('stopped')
+      setDebugLines((previous) => [...previous, {
+        type: exitCode === 0 ? 'success' : 'error',
+        text: `Debug session ended (exit ${exitCode}).`,
+      }].slice(-600))
+    })
+    return () => {
+      offOutput?.()
+      offReady?.()
+      offExit?.()
+    }
+  }, [project?.root])
+
+  async function connectDebugger(wsUrl) {
+    if (debugClientRef.current) return
+    const client = new NodeInspectorClient(wsUrl, {
+      onPaused: handleDebugPaused,
+      onResumed: () => {
+        debugPausedRef.current = false
+        setDebugStatus('running')
+        setPausedFrame(null)
+        setCallStack([])
+      },
+      onConsole: (params) => {
+        const text = (params.args ?? [])
+          .map((arg) => arg.value ?? arg.description ?? arg.type ?? '')
+          .join(' ')
+          .trim()
+        if (!text) return
+        setDebugLines((previous) => [...previous, {
+          type: params.type === 'error' ? 'error' : params.type === 'warning' ? 'warning' : 'console',
+          text,
+        }].slice(-600))
+      },
+      onException: (params) => {
+        const text = params.exceptionDetails?.exception?.description
+          ?? params.exceptionDetails?.text
+          ?? 'Runtime exception'
+        setDebugLines((previous) => [...previous, { type: 'error', text }].slice(-600))
+        const parsed = parseProblems(text, { root: projectRootRef.current })
+        if (parsed.length) setCommandProblems((previous) => mergeProblems(previous, parsed))
+      },
+      onClose: () => {
+        debugPausedRef.current = false
+        if (debugClientRef.current === client) debugClientRef.current = null
+        setPausedFrame(null)
+        setCallStack([])
+        setDebugStatus((status) => status === 'stopped' ? status : 'stopped')
+      },
+    })
+    debugClientRef.current = client
+    try {
+      await client.connect()
+      await client.enable()
+      await client.setBreakpoints(breakpointsRef.current, projectRootRef.current)
+      if (!debugPausedRef.current) setDebugStatus('running')
+      setPanelTab('debug')
+      setConsoleOpen(true)
+    } catch (debugConnectionError) {
+      if (debugClientRef.current === client) debugClientRef.current = null
+      setDebugError(debugConnectionError.message || String(debugConnectionError))
+      setDebugStatus('error')
+      client.close()
+    }
+  }
+
+  function handleDebugPaused(params) {
+    debugPausedRef.current = true
+    const frames = (params.callFrames ?? []).map(formatCallFrame)
+    const top = frames[0]
+    setCallStack(frames)
+    setPausedFrame(top ? {
+      ...top,
+      path: relativePathFromUrl(top.url, projectRootRef.current),
+      reason: params.reason ?? 'breakpoint',
+    } : null)
+    setDebugStatus('paused')
+    setPanelTab('debug')
+    setConsoleOpen(true)
+    if (top?.path) {
+      pendingRevealRef.current = { line: top.line, column: top.column }
+      void openFileAtRef.current?.(top.path, top.line, top.column)
+    }
+  }
+
+  async function startDebugging() {
+    if (!project) {
+      setDebugError('Open a project folder before starting a debug session.')
+      return
+    }
+    if (!selectedDebug) {
+      setDebugError('No Node launch configuration found. Add a JavaScript entry file or a .vscode/launch.json configuration.')
+      return
+    }
+    if (!window.javelinDesktop?.startDebug) {
+      setDebugError('The Node debugger is available in the Javelin desktop IDE.')
+      return
+    }
+    setDebugError('')
+    setDebugLines([])
+    debugOutputRef.current = ''
+    debugPausedRef.current = false
+    setDebugStatus('starting')
+    const startToken = ++debugStartTokenRef.current
+    setPanelTab('debug')
+    setConsoleOpen(true)
+    try {
+      const session = await window.javelinDesktop.startDebug(selectedDebug)
+      if (startToken !== debugStartTokenRef.current) {
+        await window.javelinDesktop.stopDebug?.(session.id)
+        return
+      }
+      debugSessionRef.current = session
+      setDebugSession(session)
+      setDebugLines([{ type: 'command', text: `> node --inspect-brk ${selectedDebug.program}` }])
+      if (session.wsUrl) void connectDebugger(session.wsUrl)
+    } catch (debugStartError) {
+      setDebugError(debugStartError.message || String(debugStartError))
+      setDebugStatus('error')
+    }
+  }
+
+  async function stopDebugging() {
+    debugStartTokenRef.current += 1
+    debugPausedRef.current = false
+    const session = debugSessionRef.current
+    debugRunAbortRef.current?.abort()
+    debugRunAbortRef.current = null
+    if (session?.id) {
+      await window.javelinDesktop?.stopDebug?.(session.id)
+    }
+    debugClientRef.current?.close()
+    debugClientRef.current = null
+    debugSessionRef.current = null
+    setDebugSession(null)
+    setPausedFrame(null)
+    setCallStack([])
+    setDebugStatus('stopped')
+  }
+
+  async function restartDebugging() {
+    await stopDebugging()
+    setTimeout(() => { void startDebugging() }, 300)
+  }
+
+  async function runWithoutDebugging() {
+    if (!project || !selectedDebug) return
+    setDebugError('')
+    setDebugLines([{ type: 'command', text: `> ${debugRunCommand(selectedDebug)}` }])
+    setDebugStatus('running')
+    setPanelTab('debug')
+    setConsoleOpen(true)
+    const controller = new AbortController()
+    debugRunAbortRef.current = controller
+    try {
+      const result = await onRunCommand(debugRunCommand(selectedDebug), controller.signal)
+      const output = [result.stdout, result.stderr].filter(Boolean).join('\n')
+      setDebugLines((previous) => [...previous, {
+        type: result.exitCode === 0 ? 'success' : 'error',
+        text: `${output || '(no output)'}\nexit code: ${result.exitCode}`,
+      }].slice(-600))
+      setCommandProblems(parseProblems(output, {
+        defaultPath: activeFileRef.current,
+        root: projectRootRef.current,
+      }))
+    } catch (runError) {
+      setDebugLines((previous) => [...previous, {
+        type: 'error',
+        text: controller.signal.aborted ? 'Run stopped.' : runError.message || String(runError),
+      }].slice(-600))
+    } finally {
+      if (debugRunAbortRef.current === controller) debugRunAbortRef.current = null
+      setDebugStatus('stopped')
+    }
+  }
+
+  async function resumeDebugging() {
+    try { await debugClientRef.current?.resume() } catch (error) { setDebugError(error.message || String(error)) }
+  }
+
+  async function pauseDebugging() {
+    try { await debugClientRef.current?.pause() } catch (error) { setDebugError(error.message || String(error)) }
+  }
+
+  async function stepDebug(kind) {
+    try {
+      if (kind === 'over') await debugClientRef.current?.stepOver()
+      else if (kind === 'into') await debugClientRef.current?.stepInto()
+      else if (kind === 'out') await debugClientRef.current?.stepOut()
+    } catch (error) {
+      setDebugError(error.message || String(error))
+    }
+  }
+
+  async function evaluateInDebugConsole(event) {
+    event.preventDefault()
+    const expression = debugConsoleInput.trim()
+    if (!expression) return
+    setDebugConsoleInput('')
+    setDebugLines((previous) => [...previous, { type: 'command', text: `> ${expression}` }].slice(-600))
+    if (!debugClientRef.current) {
+      setDebugLines((previous) => [...previous, { type: 'error', text: 'No active debug session.' }].slice(-600))
+      return
+    }
+    try {
+      const value = await debugClientRef.current.evaluate(expression, pausedFrame?.id ?? '')
+      setDebugLines((previous) => [...previous, { type: 'result', text: value || 'undefined' }].slice(-600))
+    } catch (error) {
+      setDebugLines((previous) => [...previous, { type: 'error', text: error.message || String(error) }].slice(-600))
+    }
+  }
+
+  function toggleBreakpoint(path, line) {
+    if (!path || !line || !isDebuggableFile(path)) {
+      setDebugError('Breakpoints are available for JavaScript Node files (.js, .mjs, .cjs).')
+      return
+    }
+    const existing = breakpointsRef.current.find((breakpoint) => breakpoint.path === path && breakpoint.line === line)
+    const next = existing
+      ? breakpointsRef.current.filter((breakpoint) => breakpoint.id !== existing.id)
+      : [...breakpointsRef.current, { id: `bp:${path}:${line}`, path, line }]
+    breakpointsRef.current = next
+    setBreakpoints(next)
+    setDebugError('')
+  }
+
+  function removeDebugBreakpoint(id) {
+    const next = breakpointsRef.current.filter((breakpoint) => breakpoint.id !== id)
+    breakpointsRef.current = next
+    setBreakpoints(next)
+    if (debugClientRef.current) void debugClientRef.current.setBreakpoints(next, projectRootRef.current)
+  }
+
+  async function createLaunchJson() {
+    if (!onSaveFile) return
+    const config = JSON.parse(defaultLaunchJson())
+    if (activeFile && isDebuggableFile(activeFile)) {
+      config.configurations[0].program = `\${workspaceFolder}/${activeFile}`
+      config.configurations[0].name = `Launch ${activeFile}`
+    }
+    try {
+      await onSaveFile('.vscode/launch.json', JSON.stringify(config, null, 2))
+      setSelectedDebugConfig('')
+      setPanelTab('debug')
+    } catch (error) {
+      setDebugError(error.message || String(error))
+    }
+  }
+
+  useEffect(() => {
+    const handleDebugShortcuts = (event) => {
+      if (event.shiftKey && event.key === 'F5') {
+        event.preventDefault()
+        void stopDebugging()
+        return
+      }
+      if (event.key === 'F5') {
+        event.preventDefault()
+        if (debugStatus === 'paused') void resumeDebugging()
+        else if (debugStatus === 'running' || debugStatus === 'starting') void stopDebugging()
+        else void startDebugging()
+        return
+      }
+      if (event.key === 'F10') {
+        event.preventDefault()
+        void stepDebug('over')
+        return
+      }
+      if (event.key === 'F11') {
+        event.preventDefault()
+        void stepDebug(event.shiftKey ? 'out' : 'into')
+        return
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'm') {
+        event.preventDefault()
+        setPanelTab('problems')
+        setConsoleOpen(true)
+        return
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'd') {
+        event.preventDefault()
+        setActivityView('debug')
+        setPanelTab('debug')
+        setConsoleOpen(true)
+      }
+    }
+    window.addEventListener('keydown', handleDebugShortcuts)
+    return () => window.removeEventListener('keydown', handleDebugShortcuts)
+  }, [debugStatus, selectedDebug, project, activeFile])
+
   const editorOptions = {
     automaticLayout: true,
     fontFamily: 'Cascadia Code, Consolas, monospace',
@@ -1064,6 +1570,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
     fontLigatures: true,
     lineHeight: Math.round(fontSize * 1.55),
     minimap: { enabled: false },
+    glyphMargin: true,
     padding: { top: 14 },
     scrollBeyondLastLine: false,
     smoothScrolling: true,
@@ -1157,13 +1664,14 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
         <button className={activityView === 'search' ? 'is-active' : ''} title="Search files" aria-label="Search files" onClick={() => void openActivityView('search')}><Search size={19} /></button>
         <button className={activityView === 'source' ? 'is-active' : ''} title="Source Control" aria-label="Source Control" disabled={!project} onClick={() => void openActivityView('source')}><GitBranch size={19} /></button>
         <button className={consoleOpen ? 'is-active' : ''} title="Run and terminal" aria-label="Run and terminal" onClick={() => void openActivityView('run')}><Play size={19} /></button>
+        <button className={activityView === 'debug' ? 'is-active' : ''} title="Run and Debug (Ctrl+Shift+D)" aria-label="Run and Debug" onClick={() => void openActivityView('debug')}><Bug size={19} /></button>
         <button title="Javelin Assistant" aria-label="Javelin Assistant" onClick={() => void openActivityView('assistant')}><Sparkles size={19} /></button>
         <button className="activity-settings" title="Settings" aria-label="Settings" onClick={() => void openActivityView('settings')}><Settings size={19} /></button>
       </nav>
 
       <aside className="workbench-explorer">
         <div className="explorer-heading">
-          <span>{activityView === 'source' ? 'SOURCE CONTROL' : activityView === 'search' ? 'SEARCH' : 'EXPLORER'}</span>
+          <span>{activityView === 'source' ? 'SOURCE CONTROL' : activityView === 'search' ? 'SEARCH' : activityView === 'debug' ? 'RUN AND DEBUG' : 'EXPLORER'}</span>
           <div className="explorer-actions">
             <IconButton title="Expand all folders" disabled={!allDirectories.length} onClick={() => setExpanded(new Set(allDirectories))}><ChevronsUpDown size={15} /></IconButton>
             <IconButton title="Collapse all folders" disabled={!expanded.size} onClick={() => setExpanded(new Set())}><ChevronsDownUp size={15} /></IconButton>
@@ -1211,6 +1719,93 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
                 </>
               ) : (
                 <p className="tree-empty">No matches for “{search}”.</p>
+              )}
+            </div>
+          ) : activityView === 'debug' ? (
+            <div className="debug-view">
+              <div className="debug-view-heading">
+                <span>LAUNCH CONFIGURATION</span>
+                <button type="button" disabled={!project} onClick={() => void createLaunchJson()}>Edit launch.json</button>
+              </div>
+              {!project ? (
+                <p className="tree-empty">Open a project folder to discover Node launch configurations.</p>
+              ) : (
+                <>
+                  <label className="debug-config-label">
+                    Configuration
+                    <select
+                      value={selectedDebug?.id ?? ''}
+                      disabled={!debugConfigs.length}
+                      onChange={(event) => setSelectedDebugConfig(event.target.value)}
+                    >
+                      {debugConfigs.length
+                        ? debugConfigs.map((config) => <option key={config.id} value={config.id}>{config.name}</option>)
+                        : <option value="">No Node launch configuration</option>}
+                    </select>
+                  </label>
+                  <div className="debug-start-row">
+                    <button
+                      type="button"
+                      className="debug-primary"
+                      disabled={!selectedDebug || ['starting', 'running', 'paused'].includes(debugStatus)}
+                      onClick={() => void startDebugging()}
+                    ><Play size={14} /> Start Debugging</button>
+                    <button
+                      type="button"
+                      disabled={!selectedDebug || debugStatus === 'running' || debugStatus === 'starting'}
+                      onClick={() => void runWithoutDebugging()}
+                    ><Play size={14} /> Run Without Debugging</button>
+                  </div>
+                  <div className="debug-secondary-row">
+                    <button type="button" title="Pause (F6)" disabled={debugStatus !== 'running'} onClick={() => void pauseDebugging()}><Pause size={13} /> Pause</button>
+                    <button type="button" title="Step Over (F10)" disabled={debugStatus !== 'paused'} onClick={() => void stepDebug('over')}><ChevronDown size={13} /> Over</button>
+                    <button type="button" title="Step Into (F11)" disabled={debugStatus !== 'paused'} onClick={() => void stepDebug('into')}><ChevronRight size={13} /> Into</button>
+                    <button type="button" title="Step Out (Shift+F11)" disabled={debugStatus !== 'paused'} onClick={() => void stepDebug('out')}><ChevronUp size={13} /> Out</button>
+                    <button type="button" title="Stop (Shift+F5)" disabled={!['starting', 'running', 'paused'].includes(debugStatus)} onClick={() => void stopDebugging()}><Square size={12} /> Stop</button>
+                    <button type="button" title="Restart" disabled={!selectedDebug || debugStatus === 'starting'} onClick={() => void restartDebugging()}><RotateCcw size={12} /> Restart</button>
+                  </div>
+                  <div className={`debug-state debug-state-${debugStatus}`}>
+                    <span className="debug-state-dot" /> {debugStatus.toUpperCase()}
+                    {debugSession?.port ? <small> inspector :{debugSession.port}</small> : null}
+                  </div>
+                  {debugError && <p className="debug-error">{debugError}</p>}
+                  {!debugConfigs.length && (
+                    <p className="debug-hint">
+                      No Node entry file was found. Add a <code>.js</code> entry file or create <code>.vscode/launch.json</code>.
+                      <button type="button" onClick={() => void createLaunchJson()}>Create launch.json</button>
+                    </p>
+                  )}
+                  <section className="debug-section">
+                    <h4>BREAKPOINTS <span>{breakpoints.length}</span></h4>
+                    {breakpoints.length ? breakpoints.map((breakpoint) => (
+                      <div className="debug-breakpoint-row" key={breakpoint.id}>
+                        <button type="button" className="debug-breakpoint-open" onClick={() => void openFileAt(breakpoint.path, breakpoint.line, 1)}>
+                          <Circle size={8} fill="currentColor" /> {breakpoint.path}<small>:{breakpoint.line}</small>
+                        </button>
+                        <button type="button" className="debug-breakpoint-remove" title="Remove breakpoint" onClick={() => removeDebugBreakpoint(breakpoint.id)}><X size={12} /></button>
+                      </div>
+                    )) : <p className="debug-hint">Click the editor gutter to add a breakpoint.</p>}
+                  </section>
+                  {pausedFrame && (
+                    <section className="debug-section">
+                      <h4>CALL STACK <span>{pausedFrame.reason}</span></h4>
+                      {callStack.map((frame, index) => (
+                        <button
+                          type="button"
+                          className={`debug-frame ${index === 0 ? 'is-active' : ''}`}
+                          key={frame.id}
+                          onClick={() => {
+                            const path = relativePathFromUrl(frame.url, projectRootRef.current)
+                            if (path) void openFileAt(path, frame.line, frame.column)
+                          }}
+                        >
+                          <span>{frame.functionName}</span>
+                          <small>{relativePathFromUrl(frame.url, projectRootRef.current) || frame.url}:{frame.line}</small>
+                        </button>
+                      ))}
+                    </section>
+                  )}
+                </>
               )}
             </div>
           ) : project ? (
@@ -1323,6 +1918,8 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
               <Columns2 size={15} />
             </IconButton>
             <IconButton title={wordWrap ? 'Turn word wrap off' : 'Turn word wrap on'} onClick={() => setWordWrap((on) => !on)}><WrapText size={15} /></IconButton>
+            <IconButton title={`Problems (${problemSummary.total}) — Ctrl+Shift+M`} onClick={() => { setPanelTab('problems'); setConsoleOpen(true) }}><AlertTriangle size={15} /></IconButton>
+            <IconButton title="Run and Debug (Ctrl+Shift+D)" onClick={() => void openActivityView('debug')}><Bug size={15} /></IconButton>
             <IconButton title={consoleOpen ? 'Hide terminal' : 'Show terminal'} onClick={() => setConsoleOpen((open) => !open)}><Terminal size={15} /></IconButton>
             <IconButton title="Save file (Ctrl+S)" disabled={!dirty || busy} onClick={() => void saveFile()}><Save size={15} /></IconButton>
             <IconButton title="Rename or move active file" disabled={!activeFile || busy} onClick={() => void renameActiveFile()}><Pencil size={14} /></IconButton>
@@ -1376,10 +1973,21 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
               onChange={(value) => setFileDrafts((previous) => ({ ...previous, [activeFile]: value ?? '' }))}
               theme="javelin-dark"
               beforeMount={defineJavelinTheme}
-              onMount={(editor) => {
+              onMount={(editor, monaco) => {
                 editorRef.current = editor
+                monacoRef.current = monaco
+                setEditorMount((value) => value + 1)
                 editor.onDidChangeCursorPosition((event) => {
                   setCursor({ line: event.position.lineNumber, column: event.position.column })
+                })
+                editor.onMouseDown((event) => {
+                  const target = event.target
+                  if (
+                    target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN &&
+                    target.type !== monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS
+                  ) return
+                  const line = target.position?.lineNumber
+                  if (line) toggleBreakpoint(activeFileRef.current, line)
                 })
                 const reveal = pendingRevealRef.current
                 if (reveal) {
@@ -1434,7 +2042,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
                   onChange={(value) => setFileDrafts((previous) => ({ ...previous, [secondaryFile]: value ?? '' }))}
                   theme="javelin-dark"
                   beforeMount={defineJavelinTheme}
-                  onMount={(editor) => { secondaryEditorRef.current = editor }}
+                  onMount={(editor, monaco) => { secondaryEditorRef.current = editor; monacoRef.current = monaco; setEditorMount((value) => value + 1) }}
                   options={editorOptions}
                 />
               </Suspense>
@@ -1442,44 +2050,157 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
           )}
         </div>
         {consoleOpen && (
-          <section className="workbench-console" aria-label="Build and terminal output">
-            <header className="console-heading">
-              <span>TERMINAL / OUTPUT</span>
-              <IconButton title="Clear terminal output" onClick={() => setConsoleLines([])}><X size={14} /></IconButton>
+          <section className={`workbench-console panel-${panelTab}`} aria-label="Problems, terminal and debug console">
+            <header className="console-heading console-tabs-heading">
+              <div className="console-tabs" role="tablist" aria-label="Workbench panel">
+                <button type="button" role="tab" aria-selected={panelTab === 'problems'} className={panelTab === 'problems' ? 'is-active' : ''} onClick={() => setPanelTab('problems')}>
+                  Problems {problemSummary.total > 0 && <span className="panel-count">{problemSummary.total}</span>}
+                </button>
+                <button type="button" role="tab" aria-selected={panelTab === 'terminal'} className={panelTab === 'terminal' ? 'is-active' : ''} onClick={() => setPanelTab('terminal')}>TERMINAL</button>
+                <button type="button" role="tab" aria-selected={panelTab === 'debug'} className={panelTab === 'debug' ? 'is-active' : ''} onClick={() => setPanelTab('debug')}>
+                  DEBUG CONSOLE {debugStatus === 'paused' && <span className="panel-count debug-count">!</span>}
+                </button>
+              </div>
+              <div className="console-heading-actions">
+                {panelTab === 'problems' && (
+                  <IconButton title="Clear diagnostics parsed from command output" disabled={!commandProblems.length} onClick={() => setCommandProblems([])}><Trash2 size={13} /></IconButton>
+                )}
+                {panelTab === 'terminal' && (
+                  <IconButton title="Clear terminal output" onClick={() => setConsoleLines([])}><X size={14} /></IconButton>
+                )}
+                <IconButton title="Close panel" onClick={() => setConsoleOpen(false)}><X size={14} /></IconButton>
+              </div>
             </header>
-            <div className="console-scrollback" role="log" aria-live="polite">
-              {commandOutput.map((entry, index) => <pre className={`console-line ${entry.type}`} key={`agent-${index}`}>{entry.text}</pre>)}
-              {consoleLines.map((entry, index) => <pre className={`console-line ${entry.type}`} key={`manual-${index}`}>{entry.text}</pre>)}
-              {!commandOutput.length && !consoleLines.length && <span className="console-placeholder">Command output appears here.</span>}
-            </div>
-            <form className="console-command-form" onSubmit={runTerminalCommand}>
-              <span aria-hidden="true">&gt;</span>
-              <input
-                value={consoleInput}
-                onChange={(event) => { setConsoleInput(event.target.value); setHistoryIndex(-1) }}
-                onKeyDown={handleConsoleHistory}
-                placeholder={project ? 'Run a command in the project folder' : 'Open a project folder first'}
-                title="Use ↑ and ↓ to recall previous commands"
-                aria-label="Project terminal command"
-                disabled={!project || consoleBusy}
-                autoComplete="off"
-              />
-              {consoleBusy ? (
-                <button type="button" title="Cancel command" aria-label="Cancel command" onClick={cancelConsoleCommand}>
-                  <Square size={13} />
-                </button>
-              ) : (
-                <button type="submit" title="Run command" aria-label="Run command" disabled={!project || !consoleInput.trim()}>
-                  <Play size={13} />
-                </button>
-              )}
-            </form>
+            {panelTab === 'problems' ? (
+              <div className="problems-panel" role="tabpanel">
+                <div className="problems-toolbar">
+                  <div className="problems-filters" role="group" aria-label="Filter problems">
+                    <button type="button" className={problemFilter === 'all' ? 'is-active' : ''} onClick={() => setProblemFilter('all')}>All {problemSummary.total}</button>
+                    <button type="button" className={problemFilter === 'errors' ? 'is-active' : ''} onClick={() => setProblemFilter('errors')}><AlertCircle size={12} /> {problemSummary.errors}</button>
+                    <button type="button" className={problemFilter === 'warnings' ? 'is-active' : ''} onClick={() => setProblemFilter('warnings')}><AlertTriangle size={12} /> {problemSummary.warnings}</button>
+                  </div>
+                  <span className="problems-hint">Live syntax analysis · command output</span>
+                </div>
+                {problemGroups.length ? (
+                  <div className="problems-list" role="list">
+                    {problemGroups.map(([path, list]) => (
+                      <div className="problem-group" key={path || '(project)'}>
+                        <button type="button" className="problem-file" onClick={() => {
+                          const first = list.find((problem) => problem.path)
+                          if (first) void openFileAt(first.path, first.line, first.column)
+                        }} disabled={path === '(project)'}>
+                          <FileTypeIcon name={path} />
+                          <span>{path}</span>
+                          <small>{list.length}</small>
+                        </button>
+                        <div className="problem-rows">
+                          {list.map((problem, index) => (
+                            <button
+                              type="button"
+                              role="listitem"
+                              className={`problem-row ${problem.severity}`}
+                              key={`${problem.path}:${problem.line}:${problem.column}:${index}`}
+                              onClick={() => problem.path && void openFileAt(problem.path, problem.line, problem.column)}
+                            >
+                              {problem.severity === 'error' ? <AlertCircle size={13} /> : problem.severity === 'warning' ? <AlertTriangle size={13} /> : <Info size={13} />}
+                              <span className="problem-message">{problem.message}</span>
+                              {problem.code && <code>{problem.code}</code>}
+                              <span className="problem-source">{problem.source}</span>
+                              <span className="problem-location">{problem.path ? `${problem.path}:${problem.line}:${problem.column}` : 'project'}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="problems-empty">
+                    <AlertCircle size={18} />
+                    <strong>No problems detected</strong>
+                    <span>Open a JavaScript, TypeScript or JSON file to see live errors and warnings here. Build, lint, test and debug output is also parsed into Problems.</span>
+                    <div>
+                      <button type="button" disabled={!project} onClick={() => { setConsoleInput('npm test'); setPanelTab('terminal') }}>Run tests</button>
+                      <button type="button" disabled={!project} onClick={() => { setConsoleInput('npm run build'); setPanelTab('terminal') }}>Run build</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : panelTab === 'debug' ? (
+              <div className="debug-console-panel" role="tabpanel">
+                <div className="debug-console-toolbar">
+                  <button type="button" title="Continue (F5)" disabled={debugStatus !== 'paused'} onClick={() => void resumeDebugging()}><Play size={12} /> Continue</button>
+                  <button type="button" title="Pause" disabled={debugStatus !== 'running'} onClick={() => void pauseDebugging()}><Pause size={12} /> Pause</button>
+                  <button type="button" title="Step Over (F10)" disabled={debugStatus !== 'paused'} onClick={() => void stepDebug('over')}><ChevronDown size={12} /> Over</button>
+                  <button type="button" title="Step Into (F11)" disabled={debugStatus !== 'paused'} onClick={() => void stepDebug('into')}><ChevronRight size={12} /> Into</button>
+                  <button type="button" title="Step Out (Shift+F11)" disabled={debugStatus !== 'paused'} onClick={() => void stepDebug('out')}><ChevronUp size={12} /> Out</button>
+                  <button type="button" title="Stop (Shift+F5)" disabled={!['starting', 'running', 'paused'].includes(debugStatus)} onClick={() => void stopDebugging()}><Square size={11} /> Stop</button>
+                  <span className={`debug-console-state ${debugStatus}`}>{debugStatus}</span>
+                </div>
+                <div className="console-scrollback debug-console-log" role="log" aria-live="polite">
+                  {debugLines.map((entry, index) => <pre className={`console-line ${entry.type}`} key={`debug-${index}`}>{entry.text}</pre>)}
+                  {!debugLines.length && <span className="console-placeholder">Start a debug session to see program output, breakpoints and evaluated expressions.</span>}
+                </div>
+                <form className="console-command-form" onSubmit={evaluateInDebugConsole}>
+                  <span aria-hidden="true">&gt;</span>
+                  <input
+                    value={debugConsoleInput}
+                    onChange={(event) => setDebugConsoleInput(event.target.value)}
+                    placeholder={pausedFrame ? `Evaluate in ${pausedFrame.functionName}` : 'Evaluate an expression in the debug console'}
+                    aria-label="Debug console expression"
+                    disabled={!debugClientRef.current}
+                    autoComplete="off"
+                  />
+                  <button type="submit" title="Evaluate expression" aria-label="Evaluate expression" disabled={!debugClientRef.current || !debugConsoleInput.trim()}>
+                    <Play size={13} />
+                  </button>
+                </form>
+              </div>
+            ) : (
+              <>
+                <div className="console-scrollback" role="log" aria-live="polite">
+                  {commandOutput.map((entry, index) => <pre className={`console-line ${entry.type}`} key={`agent-${index}`}>{entry.text}</pre>)}
+                  {consoleLines.map((entry, index) => <pre className={`console-line ${entry.type}`} key={`manual-${index}`}>{entry.text}</pre>)}
+                  {!commandOutput.length && !consoleLines.length && <span className="console-placeholder">Command output appears here.</span>}
+                </div>
+                <form className="console-command-form" onSubmit={runTerminalCommand}>
+                  <span aria-hidden="true">&gt;</span>
+                  <input
+                    value={consoleInput}
+                    onChange={(event) => { setConsoleInput(event.target.value); setHistoryIndex(-1) }}
+                    onKeyDown={handleConsoleHistory}
+                    placeholder={project ? 'Run a command in the project folder' : 'Open a project folder first'}
+                    title="Use ↑ and ↓ to recall previous commands"
+                    aria-label="Project terminal command"
+                    disabled={!project || consoleBusy}
+                    autoComplete="off"
+                  />
+                  {consoleBusy ? (
+                    <button type="button" title="Cancel command" aria-label="Cancel command" onClick={cancelConsoleCommand}>
+                      <Square size={13} />
+                    </button>
+                  ) : (
+                    <button type="submit" title="Run command" aria-label="Run command" disabled={!project || !consoleInput.trim()}>
+                      <Play size={13} />
+                    </button>
+                  )}
+                </form>
+              </>
+            )}
           </section>
         )}
         {error && <div className="workbench-error" role="alert">{error}</div>}
         <footer className="editor-statusbar">
           <span>{project?.root || 'JAVELIN DESKTOP'}</span>
           <div className="editor-status-tools">
+            <div className="statusbar-diagnostics">
+              <button type="button" title="Show Problems — errors" onClick={() => { setPanelTab('problems'); setProblemFilter('errors'); setConsoleOpen(true) }}>
+                <AlertCircle size={11} /> {problemSummary.errors}
+              </button>
+              <button type="button" title="Show Problems — warnings" onClick={() => { setPanelTab('problems'); setProblemFilter('warnings'); setConsoleOpen(true) }}>
+                <AlertTriangle size={11} /> {problemSummary.warnings}
+              </button>
+              {debugStatus !== 'idle' && <span className={`statusbar-debug ${debugStatus}`}>{debugStatus}</span>}
+            </div>
             <span>{activeFile ? `Ln ${cursor.line}, Col ${cursor.column} · ${language}` : 'Ready'}{dirty ? ' · Unsaved' : ''}{splitOpen ? ' · split' : ''}</span>
             <span className="editor-font-controls" aria-label="Editor font size">
               <button type="button" title="Decrease editor font size" aria-label="Decrease editor font size" onClick={() => setFontSize((size) => Math.max(EDITOR_FONT_MIN, size - 1))}>−</button>

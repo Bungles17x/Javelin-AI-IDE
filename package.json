@@ -59,6 +59,7 @@
     "local:model:info": "node -e \"import('./local-model/adapter.js').then(m => console.log(m.getModelInfo()))\""
   },
   "dependencies": {
+    "@babel/parser": "^8.1.2",
     "@huggingface/transformers": "^4.3.2",
     "clsx": "^2.1.0",
     "electron-updater": "^6.8.11",

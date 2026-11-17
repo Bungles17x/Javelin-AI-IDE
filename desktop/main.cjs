@@ -3,6 +3,7 @@ const { autoUpdater } = require('electron-updater')
 const fs = require('node:fs/promises')
 const { existsSync } = require('node:fs')
 const http = require('node:http')
+const net = require('node:net')
 const path = require('node:path')
 const { spawn, spawnSync } = require('node:child_process')
 const { supportsTextFile } = require('./textFileTypes.cjs')
@@ -16,6 +17,7 @@ const MAX_WORKSPACE_BYTES = 50_000_000
 const MAX_WORKSPACE_FILES = 4000
 let workspaceRoot = null
 const runningCommands = new Map()
+const debugSessions = new Map()
 let rendererServer = null
 let updateTimer = null
 let updateDialogOpen = false
@@ -379,6 +381,141 @@ ipcMain.handle('workspace:run-command', async (event, id, command) => {
   })
 })
 
+function freeDebugPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.unref()
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      const port = typeof address === 'object' && address ? address.port : 0
+      server.close(() => resolve(port))
+    })
+  })
+}
+
+async function resolveDebugPath(relativePath, { directory = false } = {}) {
+  if (typeof relativePath !== 'string' || !relativePath.trim()) {
+    throw new Error('The debug configuration is missing a program path.')
+  }
+  const target = resolveWorkspacePath(relativePath)
+  await assertInsideWorkspace(target)
+  const stat = await fs.stat(target)
+  if (directory && !stat.isDirectory()) throw new Error(`Debug working directory is not a folder: ${relativePath}`)
+  if (!directory && !stat.isFile()) throw new Error(`Debug program is not a file: ${relativePath}`)
+  return target
+}
+
+/**
+ * Launch a Node program under the built-in inspector.
+ *
+ * ELECTRON_RUN_AS_NODE lets the packaged app use its bundled Node runtime, so a
+ * user does not need a separate Node executable on PATH. The inspector binds to
+ * loopback only and the renderer connects to the WebSocket URL printed by Node.
+ */
+ipcMain.handle('debug:start', async (event, config) => {
+  if (!workspaceRoot) throw new Error('Open a project folder before debugging.')
+  if (!config || typeof config !== 'object') throw new Error('Invalid debug configuration.')
+  const program = await resolveDebugPath(config.program)
+  const cwd = config.cwd ? await resolveDebugPath(config.cwd, { directory: true }) : workspaceRoot
+  if (!['.js', '.mjs', '.cjs'].includes(path.extname(program).toLowerCase())) {
+    throw new Error('The Javelin debugger currently launches JavaScript Node programs (.js, .mjs, .cjs).')
+  }
+  const args = Array.isArray(config.args) ? config.args.filter((value) => typeof value === 'string') : []
+  const runtimeArgs = Array.isArray(config.runtimeArgs)
+    ? config.runtimeArgs.filter((value) => typeof value === 'string' && !/^--inspect(?:-brk)?(?:=|$)/.test(value))
+    : []
+  const env = {
+    ...process.env,
+    ...(config.env && typeof config.env === 'object' && !Array.isArray(config.env)
+      ? Object.fromEntries(Object.entries(config.env).filter(([, value]) => typeof value === 'string'))
+      : {}),
+    ELECTRON_RUN_AS_NODE: '1',
+  }
+  const port = await freeDebugPort()
+  if (!port) throw new Error('Could not reserve a local debug port.')
+  const id = `debug_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  const child = spawn(
+    process.execPath,
+    [`--inspect-brk=127.0.0.1:${port}`, '--enable-source-maps', ...runtimeArgs, program, ...args],
+    { cwd, env, windowsHide: true },
+  )
+  const session = { id, child, event, port, ready: false, exited: false }
+  debugSessions.set(id, session)
+
+  let resolveReady
+  let rejectReady
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve
+    rejectReady = reject
+  })
+  const readyTimer = setTimeout(() => {
+    rejectReady(new Error('The Node inspector did not start within 8 seconds.'))
+  }, 8000)
+
+  const send = (channel, ...payload) => {
+    if (!event.sender.isDestroyed()) event.sender.send(channel, ...payload)
+  }
+  const forward = (stream, chunk) => {
+    const text = chunk.toString('utf8')
+    send('debug:output', id, stream, text)
+    if (!session.ready) {
+      const match = text.match(/Debugger listening on (ws:\/\/[^\s]+)/i)
+      if (match) {
+        session.ready = true
+        resolveReady(match[1])
+        send('debug:ready', id, match[1])
+      }
+    }
+  }
+  child.stdout.on('data', (chunk) => forward('stdout', chunk))
+  child.stderr.on('data', (chunk) => forward('stderr', chunk))
+  child.on('error', (error) => {
+    forward('stderr', Buffer.from(`${error.message}\n`))
+    if (!session.ready) rejectReady(error)
+    if (!session.exited) {
+      session.exited = true
+      send('debug:exit', id, 1)
+      debugSessions.delete(id)
+    }
+  })
+  child.on('close', (code) => {
+    if (session.exited) return
+    session.exited = true
+    if (!session.ready) rejectReady(new Error(`The debug process exited before the inspector was ready (exit ${code ?? 1}).`))
+    send('debug:exit', id, code ?? 1)
+    debugSessions.delete(id)
+  })
+  try {
+    const wsUrl = await ready
+    clearTimeout(readyTimer)
+    return { id, port, wsUrl }
+  } catch (error) {
+    clearTimeout(readyTimer)
+    session.exited = true
+    debugSessions.delete(id)
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+    } else {
+      child.kill('SIGTERM')
+    }
+    throw error
+  }
+})
+
+ipcMain.handle('debug:stop', async (_event, id) => {
+  const session = debugSessions.get(id)
+  if (!session) return { stopped: false }
+  session.exited = true
+  debugSessions.delete(id)
+  if (process.platform === 'win32') {
+    spawn('taskkill', ['/pid', String(session.child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+  } else {
+    session.child.kill('SIGTERM')
+  }
+  return { stopped: true }
+})
+
 ipcMain.on('workspace:cancel-command', (_event, id) => {
   runningCommands.get(id)?.kill()
 })
@@ -511,5 +648,9 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   if (updateTimer) clearInterval(updateTimer)
   updateTimer = null
+  for (const session of debugSessions.values()) {
+    try { session.child.kill() } catch { /* already gone */ }
+  }
+  debugSessions.clear()
   rendererServer?.close()
 })

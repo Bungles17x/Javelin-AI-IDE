@@ -240,6 +240,105 @@ button.editor-crumb:hover { background: rgba(255, 255, 255, .08); color: var(--i
 .editor-font-controls button { display: inline-grid; width: 16px; height: 15px; place-items: center; padding: 0; border: 0; border-radius: 3px; background: rgba(0, 0, 0, .16); color: #d3dfb2; font: 11px/1 'Cascadia Code', Consolas, monospace; cursor: pointer; }
 .editor-font-controls button:hover { background: rgba(0, 0, 0, .3); color: #f1f7d8; }
 .editor-font-controls > span { min-width: 25px; text-align: center; }
+.statusbar-diagnostics { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; }
+.statusbar-diagnostics button { display: inline-flex; align-items: center; gap: 3px; padding: 1px 4px; border: 0; border-radius: 3px; background: rgba(0, 0, 0, .16); color: #d3dfb2; font: inherit; cursor: pointer; }
+.statusbar-diagnostics button:hover { background: rgba(0, 0, 0, .3); color: #f1f7d8; }
+.statusbar-debug { padding: 1px 5px; border-radius: 3px; background: rgba(211, 239, 116, .14); color: #d3ef74; font-size: 8px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.statusbar-debug.paused { background: rgba(228, 177, 80, .18); color: #f0c574; }
+.statusbar-debug.error { background: rgba(199, 86, 86, .18); color: #ffaaa4; }
+.console-tabs-heading { padding-left: 7px; }
+.console-tabs { display: flex; align-self: stretch; gap: 1px; }
+.console-tabs button { display: inline-flex; align-items: center; gap: 5px; padding: 0 9px; border: 0; border-bottom: 1px solid transparent; background: transparent; color: #8e9c90; font: 9px 'Cascadia Code', Consolas, monospace; font-weight: 700; letter-spacing: .06em; cursor: pointer; }
+.console-tabs button:hover { color: #dce7d8; }
+.console-tabs button.is-active { border-bottom-color: var(--ide-accent); color: #e6f0cf; }
+.panel-count { display: inline-grid; min-width: 15px; height: 15px; place-items: center; padding: 0 4px; border-radius: 8px; background: #354126; color: #d3ef74; font-size: 8px; }
+.debug-count { background: #5a3a27; color: #ffc58a; }
+.console-heading-actions { display: flex; align-items: center; }
+.workbench-console.panel-problems, .workbench-console.panel-debug { grid-template-rows: 31px minmax(0, 1fr); }
+.problems-panel { display: flex; min-height: 0; flex-direction: column; }
+.problems-toolbar { display: flex; min-height: 29px; align-items: center; justify-content: space-between; gap: 10px; padding: 0 10px; border-bottom: 1px solid #252d27; }
+.problems-filters { display: flex; align-items: center; gap: 4px; }
+.problems-filters button { display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #8f9b92; font: 9px 'Cascadia Code', Consolas, monospace; cursor: pointer; }
+.problems-filters button:hover { background: #202820; color: #dce7d8; }
+.problems-filters button.is-active { border-color: #3d4b38; background: #293326; color: #e0edc4; }
+.problems-hint { overflow: hidden; color: #69756b; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.problems-list { min-height: 0; overflow: auto; padding: 4px 0 8px; }
+.problem-group { padding: 0 8px; }
+.problem-file { display: flex; width: 100%; align-items: center; gap: 6px; padding: 4px 5px; border: 0; border-radius: 3px; background: transparent; color: #aeb9af; font: 10px 'Cascadia Code', Consolas, monospace; text-align: left; cursor: pointer; }
+.problem-file:hover { background: #202821; color: #e0e9da; }
+.problem-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.problem-file small { margin-left: auto; color: #77857a; }
+.problem-rows { display: grid; gap: 1px; padding-left: 13px; }
+.problem-row { display: grid; width: 100%; grid-template-columns: 14px minmax(0, 1fr) auto auto; align-items: center; gap: 6px; padding: 4px 5px; border: 0; border-radius: 3px; background: transparent; color: #c6d0c8; font: 10px 'Cascadia Code', Consolas, monospace; text-align: left; cursor: pointer; }
+.problem-row:hover { background: #232c24; }
+.problem-row.error > svg { color: #ff8f88; }
+.problem-row.warning > svg { color: #e7bd6d; }
+.problem-row.info > svg { color: #8db4d9; }
+.problem-message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.problem-row code { padding: 1px 4px; border-radius: 3px; background: #2c362e; color: #9fb59f; font-size: 9px; }
+.problem-source { color: #7f8d81; font-size: 9px; }
+.problem-location { color: #718076; font-size: 9px; white-space: nowrap; }
+.problems-empty { display: grid; place-content: center; justify-items: center; gap: 6px; min-height: 0; flex: 1; padding: 18px; color: #89968b; text-align: center; }
+.problems-empty > svg { color: #7d9a58; }
+.problems-empty strong { color: #d8e5cc; font-size: 12px; font-weight: 600; }
+.problems-empty span { max-width: 470px; font-size: 10px; line-height: 1.5; }
+.problems-empty > div { display: flex; gap: 6px; margin-top: 4px; }
+.problems-empty button, .debug-hint button { padding: 4px 8px; border: 1px solid #3d4a3d; border-radius: 4px; background: #202820; color: #cbd8c2; font-size: 10px; cursor: pointer; }
+.problems-empty button:hover, .debug-hint button:hover { border-color: #7e9a55; color: #e3efce; }
+.debug-view { min-height: 0; overflow: auto; padding: 9px; }
+.debug-view-heading { display: flex; align-items: center; justify-content: space-between; gap: 7px; margin-bottom: 9px; color: #8f9d91; font-size: 9px; font-weight: 700; letter-spacing: .06em; }
+.debug-view-heading button { padding: 3px 5px; border: 0; border-radius: 3px; background: transparent; color: #a8b8a5; font: 9px 'Cascadia Code', Consolas, monospace; cursor: pointer; }
+.debug-view-heading button:hover { background: #273028; color: #e3efce; }
+.debug-config-label { display: grid; gap: 4px; color: #89978c; font-size: 9px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; }
+.debug-config-label select { width: 100%; height: 27px; padding: 0 5px; border: 1px solid #3b473c; border-radius: 4px; background: #1a211b; color: #dce7d8; font: 10px 'Cascadia Code', Consolas, monospace; outline: 0; }
+.debug-config-label select:focus { border-color: #789450; }
+.debug-start-row, .debug-secondary-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.debug-start-row button, .debug-secondary-row button { display: inline-flex; min-height: 25px; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid #3b473c; border-radius: 4px; background: #202820; color: #c1cec2; font: 9px 'Cascadia Code', Consolas, monospace; cursor: pointer; }
+.debug-start-row button:hover, .debug-secondary-row button:hover { border-color: #6f8a4d; color: #e5f0d4; }
+.debug-start-row button.debug-primary { border-color: #6f8a4d; background: #314225; color: #e5f0d4; }
+.debug-start-row button:disabled, .debug-secondary-row button:disabled { cursor: default; opacity: .42; }
+.debug-state { display: flex; align-items: center; gap: 5px; margin-top: 9px; color: #a9b8a6; font: 9px 'Cascadia Code', Consolas, monospace; }
+.debug-state small { color: #768477; }
+.debug-state-dot { width: 6px; height: 6px; border-radius: 50%; background: #778477; }
+.debug-state-running .debug-state-dot { background: #8fd56f; box-shadow: 0 0 6px rgba(143, 213, 111, .6); }
+.debug-state-paused .debug-state-dot { background: #e7bd6d; box-shadow: 0 0 6px rgba(231, 189, 109, .6); }
+.debug-state-error .debug-state-dot, .debug-state-stopped .debug-state-dot { background: #df827b; }
+.debug-error { margin: 7px 0 0; padding: 6px; border-left: 2px solid #b45b54; background: #2c1e1e; color: #f0aba3; font-size: 9px; line-height: 1.4; }
+.debug-hint { margin: 8px 0 0; color: #879389; font-size: 9px; line-height: 1.5; }
+.debug-hint code { color: #b5c99a; }
+.debug-hint button { margin-top: 6px; display: block; }
+.debug-section { margin-top: 12px; border-top: 1px solid #29322a; padding-top: 8px; }
+.debug-section h4 { display: flex; align-items: center; justify-content: space-between; margin: 0 0 4px; color: #829085; font-size: 8px; font-weight: 700; letter-spacing: .07em; }
+.debug-section h4 span { color: #657266; font-weight: 400; letter-spacing: 0; }
+.debug-breakpoint-row { display: flex; align-items: center; gap: 2px; }
+.debug-breakpoint-open { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; padding: 3px 4px; border: 0; border-radius: 3px; background: transparent; color: #bcc9ba; font: 9px 'Cascadia Code', Consolas, monospace; text-align: left; cursor: pointer; }
+.debug-breakpoint-open:hover { background: #273128; color: #e3efce; }
+.debug-breakpoint-open svg { flex: 0 0 auto; color: #d86661; }
+.debug-breakpoint-open small { margin-left: auto; color: #788578; }
+.debug-breakpoint-remove { display: grid; width: 19px; height: 19px; place-items: center; border: 0; border-radius: 3px; background: transparent; color: #7d897f; cursor: pointer; }
+.debug-breakpoint-remove:hover { background: #3a2626; color: #ffaaa4; }
+.debug-frame { display: grid; width: 100%; gap: 2px; padding: 4px 5px; border: 0; border-radius: 3px; background: transparent; color: #bdcabe; text-align: left; cursor: pointer; }
+.debug-frame:hover, .debug-frame.is-active { background: #29342a; color: #e3efce; }
+.debug-frame span { overflow: hidden; font: 10px 'Cascadia Code', Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.debug-frame small { overflow: hidden; color: #7f8e82; font: 9px 'Cascadia Code', Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.debug-console-panel { display: grid; min-height: 0; grid-template-rows: 29px minmax(0, 1fr) 34px; }
+.debug-console-toolbar { display: flex; align-items: center; gap: 3px; padding: 0 8px; border-bottom: 1px solid #252d27; }
+.debug-console-toolbar button { display: inline-flex; align-items: center; gap: 3px; padding: 3px 5px; border: 0; border-radius: 3px; background: transparent; color: #9eaca1; font: 9px 'Cascadia Code', Consolas, monospace; cursor: pointer; }
+.debug-console-toolbar button:hover { background: #273027; color: #e3efce; }
+.debug-console-toolbar button:disabled { cursor: default; opacity: .38; }
+.debug-console-state { margin-left: auto; color: #8d9b8e; font: 8px 'Cascadia Code', Consolas, monospace; text-transform: uppercase; letter-spacing: .06em; }
+.debug-console-state.paused { color: #e7bd6d; }
+.debug-console-state.running { color: #a9d68d; }
+.debug-console-log { padding-top: 6px; }
+.console-line.warning { color: #e7bd6d; }
+.console-line.console { color: #b9c7d1; }
+.console-line.result { color: #cfe4b9; }
+.debug-console-log .console-line.command { color: #a9c5df; }
+.debug-breakpoint-glyph { position: relative; }
+.debug-breakpoint-glyph::before { position: absolute; top: 50%; left: 50%; width: 8px; height: 8px; border-radius: 50%; background: #d86661; box-shadow: 0 0 0 2px rgba(216, 102, 97, .16); content: ''; transform: translate(-50%, -50%); }
+.debug-breakpoint-line { border-left: 2px solid rgba(216, 102, 97, .7); }
+.debug-paused-line { background: rgba(225, 184, 92, .14); }
+.debug-paused-glyph::before { border-radius: 1px; background: #e7bd6d; }
 .workbench-error { position: absolute; z-index: 2; right: 12px; bottom: 34px; left: 12px; padding: 8px 10px; border: 1px solid #8e4545; border-radius: 4px; background: #3a2020; color: #ffcaca; font-size: 11px; }
 .workbench-console { display: grid; min-height: 0; grid-template-rows: 31px minmax(0, 1fr) 34px; border-top: 1px solid var(--ide-border); background: #121613; }
 .agent-phase-panel { display: grid; gap: 9px; padding: 10px 12px; border: 1px solid hsl(var(--border)); border-radius: 6px; background: color-mix(in srgb, hsl(var(--card)) 82%, #93a65d 18%); font-size: 11px; }
