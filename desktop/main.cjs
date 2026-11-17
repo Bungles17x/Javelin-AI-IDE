@@ -51,11 +51,13 @@ function publishUpdateStatus(status) {
   }
   const previous = lastUpdateStatus
   lastUpdateStatus = next
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) window.webContents.send('updates:status', next)
-  }
-  // A one-second check loop must not write an identical line every second.
-  if (!previous || previous.status !== next.status || previous.version !== next.version) {
+  const changed = !previous || previous.status !== next.status || previous.version !== next.version
+  // A one-second check loop must not re-render the app or write an
+  // identical log line every second.
+  if (changed) {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send('updates:status', next)
+    }
     void logUpdate(next.message)
   }
   return next
