@@ -12,7 +12,7 @@
  */
 
 import { VirtualWorkspace } from '../src/lib/virtualWorkspace.js'
-import { normalizeToolPath, signatureOf } from '../src/lib/agentTools.js'
+import { normalizeToolArgs, normalizeToolPath, signatureOf } from '../src/lib/agentTools.js'
 import { runAgent } from '../src/lib/agent.js'
 import { ERROR_CODES } from '../src/engine/errors.js'
 
@@ -229,6 +229,80 @@ console.log('\n4b. Different cached calls are not collapsed into one repeated-ac
   })
   check('three different cached calls do not fail the run', result.status === 'done', `${result.status}: ${result.summary}`)
   check('the three different calls are each still reported as blocked', events.filter((event) => event.type === 'reminder').length === 3, String(events.filter((event) => event.type === 'reminder').length))
+}
+
+console.log('\n4c. A read without a path is repaired instead of becoming a repeat loop')
+{
+  const aliased = normalizeToolArgs({ name: 'read_file', args: { file_path: 'src\\app.js' } })
+  check('a file_path alias becomes path', aliased.args.path === 'src/app.js', JSON.stringify(aliased.args))
+  const stringArgs = normalizeToolArgs({ name: 'read_file', args: '{"path":"src/app.js"}' })
+  check('JSON string arguments are parsed', stringArgs.args.path === 'src/app.js', JSON.stringify(stringArgs.args))
+
+  const workspace = new VirtualWorkspace({ 'src/app.js': 'export const app = 1\n' })
+  const { events, emit } = eventsFor()
+  const generate = scriptedCompletion([
+    { content: '', toolCalls: [{ id: 'missing-path', name: 'read_file', args: {} }] },
+    { content: '', toolCalls: [finishCall('read-done', 'Read the app')] },
+  ])
+  const result = await runAgent({
+    task: 'Explain src/app.js',
+    workspace,
+    provider,
+    generate,
+    signal: new AbortController().signal,
+    events: { emit, requestApproval: async () => ({ approved: true }) },
+  })
+  const read = events.find((event) => event.type === 'tool_result' && event.id === 'missing-path')
+  check('the path named by the task is used', read?.ok === true && read.output.includes('const app'), JSON.stringify(read))
+  check('the run does not report an undefined read', !events.some((event) => /read_file:undefined/.test(JSON.stringify(event))))
+  check('the repaired read completes', result.status === 'done', `${result.status}: ${result.summary}`)
+}
+
+console.log('\n4d. An unrepairable path gives a clear argument error')
+{
+  const workspace = new VirtualWorkspace({ 'src/app.js': 'export const app = 1\n' })
+  const { events, emit } = eventsFor()
+  const generate = scriptedCompletion([
+    { content: '', toolCalls: [{ id: 'no-path', name: 'read_file', args: {} }] },
+    { content: '', toolCalls: [finishCall('no-path-done', 'Could not read')] },
+  ])
+  await runAgent({
+    task: 'Explain the project',
+    workspace,
+    provider,
+    generate,
+    signal: new AbortController().signal,
+    events: { emit, requestApproval: async () => ({ approved: true }) },
+  })
+  const read = events.find((event) => event.type === 'tool_result' && event.id === 'no-path')
+  check('the error names the missing path argument', read?.output.includes('requires "path"'), JSON.stringify(read))
+  check('the error points at available files', read?.output.includes('src/app.js'), JSON.stringify(read))
+  check('the error says not to repeat the call', read?.output.includes('Do not repeat'), JSON.stringify(read))
+}
+
+console.log('\n4e. Repeating an invalid call stops as an argument error, not a three-turn loop')
+{
+  const workspace = new VirtualWorkspace({ 'src/app.js': 'export const app = 1\n' })
+  const { events, emit } = eventsFor()
+  const generate = scriptedCompletion([
+    { content: '', toolCalls: [{ id: 'bad-1', name: 'read_file', args: {} }] },
+    { content: '', toolCalls: [{ id: 'bad-2', name: 'read_file', args: {} }] },
+    { content: '', toolCalls: [{ id: 'bad-3', name: 'read_file', args: {} }] },
+  ])
+  const result = await runAgent({
+    task: 'Explain the project',
+    workspace,
+    provider,
+    generate,
+    signal: new AbortController().signal,
+    events: { emit, requestApproval: async () => ({ approved: true }) },
+  })
+  check('the run ends after the first repeated invalid call', result.code === ERROR_CODES.TOOL_ARGUMENTS, String(result.code))
+  check('the stop reason names the missing arguments', /missing required arguments/i.test(result.summary), result.summary)
+  check('it is not reported as a repeated-action loop', result.code !== ERROR_CODES.REPEATED_ACTIONS, String(result.code))
+  check('the invalid call was rejected, not executed three times',
+    events.filter((event) => event.type === 'tool_result' && event.id.startsWith('bad-')).length === 2,
+    JSON.stringify(events.filter((event) => event.type === 'tool_result').map((event) => event.id)))
 }
 
 console.log('\n5. Model failures are retried a bounded number of times')

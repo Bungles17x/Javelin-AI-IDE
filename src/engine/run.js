@@ -47,7 +47,7 @@ import {
   snapshotMetrics,
   truncateOutput,
 } from './memory.js'
-import { approvalKeyFor, executeTool, isReadOnlyTool, requiresApproval, verifyMutation, MUTATING_TOOLS } from './tools.js'
+import { approvalKeyFor, executeTool, hasMissingRequiredArgs, isReadOnlyTool, requiresApproval, verifyMutation, MUTATING_TOOLS } from './tools.js'
 import {
   AGENT_SYSTEM_PROMPT,
   CONTINUE_AFTER_REFUSAL,
@@ -279,7 +279,28 @@ export async function runAgent({
   emit({ type: 'status', text: 'Inspecting the codebase…' })
 
   const prepareToolCall = (call) => {
-    const normalized = normalizeToolArgs(canonicalizeToolCall(call))
+    let normalized = normalizeToolArgs(canonicalizeToolCall(call))
+    // A small model sometimes omits `path` from read_file. If the task names one
+    // file, or the run already read one, use that file rather than failing and
+    // repeating the empty call until the loop guard fires.
+    if (normalized.name === 'read_file' && !normalized.args?.path) {
+      const candidates = requestedPaths(effectiveTask)
+      const lastRead = [...(memory.evidence.filesRead ?? [])]
+        .filter((path) => typeof path === 'string' && path)
+        .at(-1)
+      const inferred = candidates.length === 1 ? candidates[0] : lastRead
+      let usable = Boolean(inferred)
+      if (usable && typeof workspace?.exists === 'function') {
+        try {
+          usable = Boolean(workspace.exists(inferred))
+        } catch {
+          usable = false
+        }
+      }
+      if (usable) {
+        normalized = { ...normalized, args: { ...(normalized.args ?? {}), path: inferred } }
+      }
+    }
     let id = typeof normalized?.id === 'string' && normalized.id.trim() ? normalized.id.trim() : ''
     if (!id || toolIds.used.has(id)) {
       toolIds.seq += 1
@@ -429,6 +450,18 @@ export async function runAgent({
   }
 
   /**
+   * A repeated call that is missing required arguments cannot make progress; stop
+   * with the argument error instead of counting it as an ordinary tool loop.
+   */
+  const stopForInvalidArguments = async (call) => {
+    const summary =
+      `Stopped because ${call.name} was requested again with missing required arguments. ` +
+      'The first attempt was rejected instead of executed; use the available tool output to choose a different call.'
+    emit({ type: 'error', error: summary, code: ERROR_CODES.TOOL_ARGUMENTS })
+    return (await finishIfWorkIsDone()) ?? finish('failed', summary, ERROR_CODES.TOOL_ARGUMENTS)
+  }
+
+  /**
    * Repeated failure triggers one root-cause turn. The note is added only after the
    * tool result is recorded, so the assistant tool_calls message stays paired with it.
    */
@@ -487,6 +520,9 @@ export async function runAgent({
     const gate = canAttempt(memory, signature, { allowRepeat: call.name === 'read_file' })
     if (!gate.allowed) {
       blockDuplicate(call, gate.reason)
+      if (hasMissingRequiredArgs(call)) {
+        return { done: await stopForInvalidArguments(call) }
+      }
       if (memory.loop.repeatedActions >= MAX_REPEATED_ACTIONS) {
         return {
           done:
@@ -649,11 +685,13 @@ export async function runAgent({
   /** Consecutive read-only calls run together; their results land in call order. */
   const processReadBatch = async (calls, step) => {
     const prepared = []
+    let invalidBlocked = null
     for (const call of calls) {
       const signature = signatureOf(call.name, call.args)
       const gate = canAttempt(memory, signature, { allowRepeat: call.name === 'read_file' })
       if (!gate.allowed) {
         blockDuplicate(call, gate.reason)
+        if (hasMissingRequiredArgs(call)) invalidBlocked = call
         continue
       }
       memory.loop.repeatedActions = 0
@@ -664,6 +702,7 @@ export async function runAgent({
       prepared.push({ call, signature })
     }
     if (!prepared.length) {
+      if (invalidBlocked) return { done: await stopForInvalidArguments(invalidBlocked) }
       if (memory.loop.repeatedActions >= MAX_REPEATED_ACTIONS) {
         return {
           done:
@@ -694,6 +733,10 @@ export async function runAgent({
     // Inject the diagnosis note only after every tool result in the turn is recorded:
     // a user message between an assistant tool_calls turn and its results is invalid.
     noteOutcome({ ok: outcomes.every((entry) => entry.ok) })
+
+    if (invalidBlocked) {
+      return { done: await stopForInvalidArguments(invalidBlocked) }
+    }
 
     if (memory.loop.repeatedActions >= MAX_REPEATED_ACTIONS) {
       return {

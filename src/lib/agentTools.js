@@ -531,22 +531,54 @@ export function normalizeToolPath(path) {
   return value
 }
 
-/** Normalise every path-naming argument of a tool call, leaving other tools untouched. */
+/**
+ * Normalise tool arguments before anything reads them.
+ *
+ * Local models sometimes send the arguments as a JSON string, and sometimes use
+ * `file_path`/`filename` instead of the schema's `path`. Both describe the same
+ * call, so repair them here rather than letting a missing path turn into a fake
+ * repeated-action loop.
+ */
 export function normalizeToolArgs(call) {
+  let args = call?.args
+  if (typeof args === 'string') {
+    try {
+      args = JSON.parse(args)
+    } catch {
+      args = { __raw: args, __parseError: true }
+    }
+  }
+  if (!args || typeof args !== 'object' || Array.isArray(args)) args = {}
+
   const keys = PATH_ARGUMENTS[call?.name]
-  if (!keys || !call.args || typeof call.args !== 'object') return call
-  let changed = false
-  const args = { ...call.args }
+  if (!keys) return args === call?.args ? call : { ...call, args }
+
+  let changed = args !== call?.args
+  const nextArgs = { ...args }
   for (const key of keys) {
-    const value = args[key]
+    const value = nextArgs[key]
     if (typeof value !== 'string') continue
     const next = normalizeToolPath(value)
     if (next !== value) {
-      args[key] = next
+      nextArgs[key] = next
       changed = true
     }
   }
-  return changed ? { ...call, args } : call
+
+  // Common aliases small models emit for a path argument.
+  if (call?.name !== 'rename_file' && call?.name !== 'copy_file') {
+    const hasPath = typeof nextArgs.path === 'string' && nextArgs.path.trim()
+    if (!hasPath) {
+      for (const alias of ['file_path', 'filepath', 'file', 'filename', 'target_file', 'target_path', 'directory', 'dir']) {
+        if (typeof nextArgs[alias] !== 'string' || !nextArgs[alias].trim()) continue
+        nextArgs.path = normalizeToolPath(nextArgs[alias])
+        changed = true
+        break
+      }
+    }
+  }
+
+  return changed ? { ...call, args: nextArgs } : call
 }
 
 /** Build a small function-call signature digest so we can recognise repeated attempts. */

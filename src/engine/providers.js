@@ -16,7 +16,7 @@
  * provider is refused before any request is made.
  */
 
-import { getProvider, installId, salvageToolCallsFromText } from '../lib/providers.js'
+import { getProvider, installId, parseToolArguments, salvageToolCallsFromText } from '../lib/providers.js'
 import { LOCAL_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from './limits.js'
 
 /** Extra attempts after the first request. */
@@ -278,7 +278,11 @@ async function readEventStream(response, { onToken, signal, onActivity }) {
           const target = ensureCall(call.index ?? 0)
           if (call.id) target.id = call.id
           if (call.function?.name) target.name = call.function.name
-          if (call.function?.arguments) target.argsRaw += call.function.arguments
+          if (call.function?.arguments) {
+            target.argsRaw = typeof call.function.arguments === 'string'
+              ? `${target.argsRaw}${call.function.arguments}`
+              : call.function.arguments
+          }
         }
       }
     }
@@ -316,14 +320,7 @@ async function readEventStream(response, { onToken, signal, onActivity }) {
   const toolCalls = []
   for (const call of calls) {
     if (!call?.name) continue
-    let args = {}
-    if (call.argsRaw) {
-      try {
-        args = JSON.parse(call.argsRaw)
-      } catch {
-        args = { __raw: call.argsRaw, __parseError: true }
-      }
-    }
+    const args = parseToolArguments(call.argsRaw)
     toolCalls.push({ id: call.id || `call_${toolCalls.length}`, name: call.name, args })
   }
 

@@ -27,6 +27,25 @@ import {
 
 export { TOOL_DEFS }
 
+const REQUIRED_ARGS = new Map(
+  TOOL_DEFS.map((tool) => [tool.function.name, tool.function.parameters?.required ?? []]),
+)
+
+function missingRequiredArgs(name, args) {
+  return (REQUIRED_ARGS.get(name) ?? []).filter((key) => {
+    const value = args?.[key]
+    if (value === undefined || value === null) return true
+    if (typeof value !== 'string') return true
+    // An empty file, a deletion replacement or an empty replacement string are valid.
+    return !['content', 'new_string'].includes(key) && !value.trim()
+  })
+}
+
+/** Did a call omit an argument the tool schema requires? */
+export function hasMissingRequiredArgs(call) {
+  return missingRequiredArgs(call?.name, call?.args).length > 0
+}
+
 /** Tools that change the workspace and must be verified after they run. */
 export const MUTATING_TOOLS = [
   'create_project',
@@ -132,6 +151,36 @@ export async function executeTool(call, { workspace, runCommand, memory, emit, s
     }
   }
 
+  const missing = missingRequiredArgs(call.name, args)
+  if (missing.length) {
+    const required = missing.map((key) => `"${key}"`).join(' and ')
+    let output =
+      `INVALID ARGUMENTS: ${call.name} requires ${required}. Nothing was executed. ` +
+      `Re-issue ${call.name} with ${required}, using a real workspace path. Do not repeat the same call.`
+    if (call.name === 'read_file' && workspace?.list) {
+      try {
+        if (typeof workspace.toJSON === 'function') {
+          const files = Object.keys(workspace.toJSON() ?? {}).filter(Boolean).slice(0, 40)
+          if (files.length) output += `\n\nAvailable files:\n${files.join('\n')}`
+        } else if (typeof workspace.tree === 'function') {
+          const tree = await workspace.tree('')
+          if (typeof tree === 'string' && tree.trim()) output += `\n\nProject files:\n${tree.slice(0, 4000)}`
+        } else {
+          const entries = await workspace.list('')
+          const files = (Array.isArray(entries) ? entries : [])
+            .filter((entry) => entry?.type !== 'dir')
+            .map((entry) => entry.path)
+            .filter(Boolean)
+            .slice(0, 40)
+          if (files.length) output += `\n\nAvailable files:\n${files.join('\n')}`
+        }
+      } catch {
+        // A missing path is already actionable; a listing is only a hint.
+      }
+    }
+    return { ok: false, output }
+  }
+
   try {
     switch (call.name) {
       case 'list_files': {
@@ -144,8 +193,8 @@ export async function executeTool(call, { workspace, runCommand, memory, emit, s
       }
 
       case 'read_file': {
-        memory?.evidence?.filesRead?.add(args.path)
         const content = String((await readFileWithCache(memory, workspace, args.path, args.start, args.end)) ?? '')
+        memory?.evidence?.filesRead?.add(args.path)
         // A truncated read is only useful if the model knows how to ask for the rest.
         const MAX_READ_CHARS = 24000
         if (content.length <= MAX_READ_CHARS) return { ok: true, output: content }

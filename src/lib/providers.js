@@ -539,7 +539,11 @@ export async function readStream(res, { onToken, onToolCall, signal } = {}) {
           const call = ensureCall(tc.index ?? 0)
           if (tc.id) call.id = tc.id
           if (tc.function?.name) call.name = tc.function.name
-          if (tc.function?.arguments) call.argsRaw += tc.function.arguments
+          if (tc.function?.arguments) {
+            call.argsRaw = typeof tc.function.arguments === 'string'
+              ? `${call.argsRaw}${tc.function.arguments}`
+              : tc.function.arguments
+          }
         }
       }
     }
@@ -550,14 +554,7 @@ export async function readStream(res, { onToken, onToolCall, signal } = {}) {
   const parsed = []
   for (const call of toolCalls) {
     if (!call?.name) continue
-    let args = {}
-    if (call.argsRaw) {
-      try {
-        args = JSON.parse(call.argsRaw)
-      } catch {
-        args = { __raw: call.argsRaw, __parseError: true }
-      }
-    }
+    const args = parseToolArguments(call.argsRaw)
     const result = { id: call.id || `call_${parsed.length}`, name: call.name, args }
     parsed.push(result)
     onToolCall?.(result)
@@ -578,6 +575,24 @@ export async function readStream(res, { onToken, onToolCall, signal } = {}) {
     toolCalls: parsed,
     finishReason,
     usage,
+  }
+}
+
+/**
+ * Parse one tool-call arguments payload.
+ *
+ * The OpenAI wire format requires a JSON string, but local runtimes and custom
+ * adapters sometimes hand back an already-parsed object. Accept both instead of
+ * turning a valid call into `undefined` arguments.
+ */
+export function parseToolArguments(raw) {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw
+  if (typeof raw !== 'string' || !raw.trim()) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { __raw: raw, __parseError: true }
+  } catch {
+    return { __raw: raw, __parseError: true }
   }
 }
 
