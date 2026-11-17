@@ -328,6 +328,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   const breakpointsRef = useRef([])
   const decorationIdsRef = useRef([])
   const projectRootRef = useRef(project?.root ?? '')
+  const diagnosticsCacheRef = useRef(new Map())
   const debugRunAbortRef = useRef(null)
   const debugStartTokenRef = useRef(0)
   const debugPausedRef = useRef(false)
@@ -351,10 +352,13 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   const debugConfigs = useMemo(() => buildDebugConfigurations(contents, { activeFile }), [contents, activeFile])
   const selectedDebug = debugConfigs.find((config) => config.id === selectedDebugConfig) ?? debugConfigs[0] ?? null
   const problems = useMemo(() => {
-    const known = new Set(projectFiles.map((file) => file.path))
+    const known = new Set([
+      ...projectFiles.map((file) => file.path),
+      ...openFiles,
+    ])
     return mergeProblems(liveProblems, commandProblems)
       .filter((problem) => !problem.path || known.has(problem.path))
-  }, [liveProblems, commandProblems, projectFiles])
+  }, [liveProblems, commandProblems, projectFiles, openFiles])
   const problemSummary = useMemo(() => summarizeProblems(problems), [problems])
   const visibleProblems = useMemo(() => problems.filter((problem) => {
     if (problemFilter === 'errors') return problem.severity === 'error'
@@ -1161,16 +1165,31 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
   useEffect(() => {
     const timer = setTimeout(() => {
       const next = []
-      for (const path of openFiles) {
-        const text = fileDrafts[path] ?? contents[path] ?? ''
-        next.push(...editorDiagnostics(languageForPath(path), text, path))
+      const cache = diagnosticsCacheRef.current
+      const paths = new Set([
+        ...projectFiles.map((file) => file.path),
+        ...openFiles,
+      ])
+      for (const path of paths) {
+        const text = fileDrafts[path] ?? contents[path]
+        if (typeof text !== 'string') continue
+        const cached = cache.get(path)
+        const found = cached?.text === text
+          ? cached.problems
+          : editorDiagnostics(languageForPath(path), text, path)
+        if (found !== cached?.problems) cache.set(path, { text, problems: found })
+        next.push(...found)
+      }
+      for (const path of cache.keys()) {
+        if (!paths.has(path)) cache.delete(path)
       }
       setLiveProblems(next)
     }, 220)
     return () => clearTimeout(timer)
-  }, [openFiles, fileDrafts, contents])
+  }, [projectFiles, openFiles, fileDrafts, contents])
 
   useEffect(() => {
+    diagnosticsCacheRef.current.clear()
     setCommandProblems([])
     setLiveProblems([])
     setDebugLines([])
@@ -2079,7 +2098,7 @@ export function ProjectWorkbench({ project, projectFiles = [], projectDirectorie
                     <button type="button" className={problemFilter === 'errors' ? 'is-active' : ''} onClick={() => setProblemFilter('errors')}><AlertCircle size={12} /> {problemSummary.errors}</button>
                     <button type="button" className={problemFilter === 'warnings' ? 'is-active' : ''} onClick={() => setProblemFilter('warnings')}><AlertTriangle size={12} /> {problemSummary.warnings}</button>
                   </div>
-                  <span className="problems-hint">Live syntax analysis · command output</span>
+                  <span className="problems-hint">All project files · command output</span>
                 </div>
                 {problemGroups.length ? (
                   <div className="problems-list" role="list">
