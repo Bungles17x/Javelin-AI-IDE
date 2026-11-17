@@ -41,4 +41,11 @@ contextBridge.exposeInMainWorld('javelinDesktop', Object.freeze({
     ipcRenderer.on('debug:exit', listener)
     return () => ipcRenderer.removeListener('debug:exit', listener)
   },
+  getUpdateStatus: () => ipcRenderer.invoke('updates:get-status'),
+  installUpdate: () => ipcRenderer.invoke('updates:install'),
+  onUpdateStatus: (callback) => {
+    const listener = (_event, status) => callback(status)
+    ipcRenderer.on('updates:status', listener)
+    return () => ipcRenderer.removeListener('updates:status', listener)
+  },
 }))

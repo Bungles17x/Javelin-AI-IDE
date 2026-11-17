@@ -541,6 +541,8 @@ function App() {
   const [runtimeStatus, setRuntimeStatus] = useState(null)
   const [runtimeBusy, setRuntimeBusy] = useState(false)
   const [runtimeError, setRuntimeError] = useState('')
+  const [updateStatus, setUpdateStatus] = useState(null)
+  const [updateInstalling, setUpdateInstalling] = useState(false)
   // How much Javelin may do without stopping to ask. 'ask' is the default.
   const [autonomy, setAutonomy] = useLocalStorage(STORAGE.autonomy, 'ask')
 
@@ -1019,6 +1021,30 @@ function App() {
   useEffect(() => {
     void refreshRuntimeStatus().catch((err) => setRuntimeError(err.message || String(err)))
   }, [refreshRuntimeStatus])
+
+  useEffect(() => {
+    if (!desktopApi?.onUpdateStatus) return undefined
+    let active = true
+    const applyStatus = (status) => {
+      if (active && status) setUpdateStatus(status)
+    }
+    desktopApi.getUpdateStatus?.().then(applyStatus).catch(() => {})
+    const unsubscribe = desktopApi.onUpdateStatus(applyStatus)
+    return () => {
+      active = false
+      unsubscribe?.()
+    }
+  }, [desktopApi])
+
+  const installDesktopUpdate = useCallback(async () => {
+    if (!desktopApi?.installUpdate || updateInstalling) return
+    setUpdateInstalling(true)
+    try {
+      await desktopApi.installUpdate()
+    } catch {
+      setUpdateInstalling(false)
+    }
+  }, [desktopApi, updateInstalling])
 
   const installedLocalModel = useMemo(() => {
     const installed = runtimeStatus?.ollama?.models ?? []
@@ -2742,6 +2768,9 @@ function App() {
         ? `Last synced ${new Date(historySync.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
         : 'Sync this account\'s chats across devices. Synced chats may be reviewed by staff for moderation.'
 
+  const outdatedUpdate = updateStatus && (updateStatus.status === 'available' || updateStatus.status === 'downloaded')
+    ? updateStatus
+    : null
   const showDesktopCode = Boolean(desktopApi && desktopView === 'code')
   const desktopRootClass = showDesktopCode
     ? `javelin-desktop-layout is-code-view${assistantCollapsed ? ' is-assistant-collapsed' : ''}`
@@ -3039,6 +3068,37 @@ function App() {
         </div>
         )}
       </header>
+
+      {desktopApi && outdatedUpdate && (
+        <div className="container mx-auto w-full max-w-4xl px-4 pt-3" role="alert">
+          <div className="flex items-start gap-3 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950 shadow-sm dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
+            <Download className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="min-w-0 flex-1">
+              <p className="font-medium">
+                {outdatedUpdate.status === 'downloaded' ? 'Update ready to install' : 'You are using an outdated version'}
+              </p>
+              <p className="mt-0.5 text-xs opacity-90">
+                {outdatedUpdate.status === 'downloaded'
+                  ? `Javelin AI IDE ${outdatedUpdate.version} is ready. Restart to install the update.`
+                  : `You are on ${outdatedUpdate.currentVersion}. Version ${outdatedUpdate.version} is downloading now.`}
+              </p>
+            </div>
+            {outdatedUpdate.status === 'downloaded' ? (
+              <Button
+                size="sm"
+                variant="secondary"
+                className="shrink-0"
+                disabled={updateInstalling}
+                onClick={() => void installDesktopUpdate()}
+              >
+                {updateInstalling ? 'Restarting…' : 'Restart to update'}
+              </Button>
+            ) : (
+              <span className="shrink-0 whitespace-nowrap text-xs font-medium">Downloading…</span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Conversation */}
       <main className="flex-1 overflow-y-auto">

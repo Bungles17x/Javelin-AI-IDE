@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, Notification } = require('electron')
 const { autoUpdater } = require('electron-updater')
 const fs = require('node:fs/promises')
 const { existsSync } = require('node:fs')
@@ -21,7 +21,15 @@ const debugSessions = new Map()
 let rendererServer = null
 let updateTimer = null
 let updateDialogOpen = false
-const UPDATE_CHECK_INTERVAL_MS = 10 * 60 * 1000
+let lastUpdateStatus = null
+let updateCheckInFlight = false
+let updateDownloading = false
+let updateDownloaded = false
+const notifiedUpdates = new Set()
+// The installed app checks once a second so a new release becomes visible
+// almost immediately. The feed is the released latest.yml directly, which
+// avoids GitHub API rate limits at this frequency.
+const UPDATE_CHECK_INTERVAL_MS = 1000
 
 async function logUpdate(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`
@@ -30,6 +38,45 @@ async function logUpdate(message) {
     await fs.appendFile(path.join(app.getPath('userData'), 'update.log'), line, 'utf8')
   } catch {
     // Diagnostics must never interfere with the app or the update.
+  }
+}
+
+function publishUpdateStatus(status) {
+  const next = {
+    currentVersion: app.getVersion(),
+    version: null,
+    message: '',
+    ...status,
+    at: Date.now(),
+  }
+  const previous = lastUpdateStatus
+  lastUpdateStatus = next
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send('updates:status', next)
+  }
+  // A one-second check loop must not write an identical line every second.
+  if (!previous || previous.status !== next.status || previous.version !== next.version) {
+    void logUpdate(next.message)
+  }
+  return next
+}
+
+function showUpdateNotification(title, body, key) {
+  if (notifiedUpdates.has(key)) return
+  notifiedUpdates.add(key)
+  try {
+    if (!Notification.isSupported()) return
+    const notification = new Notification({ title, body })
+    notification.on('click', () => {
+      const [window] = BrowserWindow.getAllWindows()
+      if (!window) return
+      if (window.isMinimized()) window.restore()
+      window.show()
+      window.focus()
+    })
+    notification.show()
+  } catch (error) {
+    void logUpdate(`Could not show update notification: ${String(error?.message ?? error)}`)
   }
 }
 
@@ -569,21 +616,70 @@ function setupAutoUpdates() {
   // create a second install. Pin the update to the directory this copy runs
   // from, whether that is Program Files or a per-user location.
   autoUpdater.installDirectory = path.dirname(process.execPath)
+  // Checking every second against the GitHub API would exhaust its anonymous
+  // request limit. latest/download serves the release's latest.yml directly.
+  autoUpdater.setFeedURL({
+    provider: 'generic',
+    url: 'https://github.com/Bungles17x/Javelin-AI-IDE/releases/latest/download/',
+  })
+
+  ipcMain.handle('updates:get-status', () => lastUpdateStatus ?? {
+    status: 'checking',
+    currentVersion: app.getVersion(),
+    version: null,
+    message: 'Checking for updates.',
+  })
+  ipcMain.handle('updates:install', () => {
+    if (!updateDownloaded) return { ok: false, reason: 'not-downloaded' }
+    setTimeout(() => autoUpdater.quitAndInstall(true, true), 100)
+    return { ok: true }
+  })
 
   autoUpdater.on('checking-for-update', () => {
-    void logUpdate('Checking for updates.')
+    // The one-second loop makes a log line per check noise.
   })
   autoUpdater.on('update-available', (info) => {
-    void logUpdate(`Update ${info.version} available; downloading.`)
+    updateDownloading = true
+    const currentVersion = app.getVersion()
+    publishUpdateStatus({
+      status: 'available',
+      version: info.version,
+      message: `Update ${info.version} available; downloading.`,
+    })
+    showUpdateNotification(
+      'Javelin update required',
+      `You are using Javelin AI IDE ${currentVersion}, which is outdated. Version ${info.version} is downloading now.`,
+      `available:${info.version}`,
+    )
   })
   autoUpdater.on('update-not-available', (info) => {
-    void logUpdate(`Already current at ${info.version}.`)
+    updateDownloading = false
+    publishUpdateStatus({
+      status: 'current',
+      version: info.version,
+      message: `Already current at ${info.version}.`,
+    })
   })
   autoUpdater.on('error', (error) => {
-    void logUpdate(`Update check failed: ${String(error?.message ?? error)}`)
+    updateDownloading = false
+    publishUpdateStatus({
+      status: 'error',
+      message: `Update check failed: ${String(error?.message ?? error)}`,
+    })
   })
   autoUpdater.on('update-downloaded', async (info) => {
-    await logUpdate(`Update ${info.version} downloaded and ready to install.`)
+    updateDownloading = false
+    updateDownloaded = true
+    publishUpdateStatus({
+      status: 'downloaded',
+      version: info.version,
+      message: `Update ${info.version} downloaded and ready to install.`,
+    })
+    showUpdateNotification(
+      'Javelin update ready',
+      `Javelin AI IDE ${info.version} is ready. Restart the app to install the update.`,
+      `downloaded:${info.version}`,
+    )
     if (updateDialogOpen) return
     updateDialogOpen = true
     try {
@@ -609,14 +705,20 @@ function setupAutoUpdates() {
   })
 
   const check = () => {
-    // The updater emits its own error event, which is logged above.
-    autoUpdater.checkForUpdates().catch(() => {})
+    // Do not overlap checks or disturb a download already in progress.
+    if (updateCheckInFlight || updateDownloading || updateDownloaded) return
+    updateCheckInFlight = true
+    // The updater emits its own error event, which is published above.
+    autoUpdater.checkForUpdates()
+      .catch(() => {})
+      .finally(() => { updateCheckInFlight = false })
   }
-  setTimeout(check, 5000)
+  setTimeout(check, 1000)
   updateTimer = setInterval(check, UPDATE_CHECK_INTERVAL_MS)
 }
 
 app.setName('Javelin AI IDE')
+if (process.platform === 'win32') app.setAppUserModelId('ai.javelin.ide')
 
 // On some Windows setups Electron's media capture stalls forever instead of rejecting:
 // the request is neither granted nor denied. A hard timeout turns that silence into a
