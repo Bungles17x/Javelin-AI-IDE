@@ -1,6 +1,7 @@
 import { TOOL_DEFS } from './agentTools.js'
 import { canonicalizeToolCall } from '../core/tools.js'
 import { codeError, ERROR_CODES } from '../engine/errors.js'
+import { enqueueProviderRequest, providerHasSingleRequestSlot } from './providerQueue.js'
 
 /**
  * Provider layer.
@@ -325,7 +326,16 @@ export function modelsFor(providerId, customModel) {
  * @param {number} [opts.maxTokens] optional output cap for short tasks such as chat and titles
  * @returns {Promise<{content: string, toolCalls: {id: string, name: string, args: any}[], finishReason: string, usage: object|null}>}
  */
-export async function streamCompletion({
+export async function streamCompletion(options = {}) {
+  const providerId = options.providerId || DEFAULT_PROVIDER
+  return enqueueProviderRequest(
+    providerId,
+    () => streamCompletionUnqueued(options),
+    options.signal,
+  )
+}
+
+async function streamCompletionUnqueued({
   providerId,
   baseUrl,
   apiKey,
@@ -428,9 +438,24 @@ export async function streamCompletion({
   const onCallerAbort = () => controller.abort()
   signal?.addEventListener?.('abort', onCallerAbort, { once: true })
 
+  // A just-cancelled or just-finished request can still be running at the provider
+  // for a moment. Wait and retry a 429 for one-slot providers instead of showing a
+  // rate-limit error the user cannot act on.
+  const retryBusy = providerHasSingleRequestSlot(selectedProviderId)
+  let busyRetries = 0
   let res
   try {
-    res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal })
+    for (;;) {
+      res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controller.signal })
+      if (!retryBusy || res.status !== 429 || busyRetries >= 2) break
+      await res.text().catch(() => {})
+      busyRetries += 1
+      const retryAfter = Number(res.headers.get('retry-after'))
+      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+        ? Math.min(5_000, retryAfter * 1000)
+        : busyRetries * 1_000
+      await waitForRetry(waitMs, controller.signal)
+    }
   } catch (err) {
     if (signal?.aborted) throw err
     throw codeError(
@@ -466,6 +491,24 @@ export async function streamCompletion({
   }
 
   return readStream(res, { onToken, onToolCall, signal })
+}
+
+function waitForRetry(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(Object.assign(new Error('The request was stopped.'), { name: 'AbortError' }))
+      return
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort)
+      resolve()
+    }, ms)
+    function onAbort() {
+      clearTimeout(timer)
+      reject(Object.assign(new Error('The request was stopped.'), { name: 'AbortError' }))
+    }
+    signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
 }
 
 /** Any server on this machine — the Ollama runtime or Javelin's own knowledge server. */

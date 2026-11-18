@@ -21,6 +21,7 @@ import { runAgent } from './lib/agent'
 import { createDesktopCommandRunner } from './lib/desktopCommand'
 import { VirtualWorkspace } from './lib/virtualWorkspace'
 import { getProvider, providerNeedsLocalRuntime } from './lib/providers'
+import { providerHasSingleRequestSlot } from './lib/providerQueue'
 import { useJavelin } from './hooks/useJavelin'
 import { isSmallTalk, shouldRunWorkspaceAgent } from './core/taskIntent'
 import { GUEST_DAILY_LIMIT, OWNER_USERNAME, todayKey } from './lib/ownerAuth'
@@ -78,9 +79,8 @@ const MAX_SAVED_CONVERSATIONS = 30
 
 // Chat replies are independent. A busy answer must not lock the composer; the
 // only shared limit is the number of requests this install will keep in flight.
+// One-slot providers are serialized inside the transport, for every caller.
 const MAX_CONCURRENT_RESPONSES = 100
-// The keyless upstream accepts one reply at a time. Keep those requests queued so
-// they do not race, but do not add a fixed cooldown between starts.
 const MAX_ATTACHMENTS = 4
 const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
 const MAX_FILE_TEXT_CHARS = 20_000
@@ -737,7 +737,6 @@ function App() {
   // Every chat reply has its own controller and message id. Aborting one does not
   // disturb the others, and Stop can abort the whole set.
   const chatAbortsRef = useRef(new Set())
-  const providerQueuesRef = useRef(new Map())
 
   const beginChatResponse = useCallback(() => {
     activeChatsRef.current += 1
@@ -751,23 +750,6 @@ function App() {
 
   const stopChatResponses = useCallback(() => {
     for (const controller of chatAbortsRef.current) controller.abort()
-  }, [])
-
-  // Some free endpoints accept a single request at a time. Keep those calls in a
-  // per-provider queue so they do not race; there is deliberately no fixed cooldown
-  // between starts. Keyed providers run fully in parallel.
-  const enqueueProviderTask = useCallback((providerId, task, signal) => {
-    const previous = providerQueuesRef.current.get(providerId) ?? Promise.resolve()
-    const run = previous.catch(() => {}).then(() => {
-      if (signal?.aborted) {
-        const error = new Error('Aborted')
-        error.name = 'AbortError'
-        throw error
-      }
-      return task()
-    })
-    providerQueuesRef.current.set(providerId, run.catch(() => {}))
-    return run
   }, [])
 
   const workspaceRef = useRef(new VirtualWorkspace(workspaceFiles, workspaceDirectories))
@@ -1306,9 +1288,7 @@ function App() {
       messages,
       signal: controller.signal,
     })
-    const request = providerId === 'javelinclouddirect' || providerId === 'javelincloud'
-      ? enqueueProviderTask(providerId, requestTitle, controller.signal)
-      : requestTitle()
+    const request = requestTitle()
     request.then((result) => {
       if (!result?.title) return
       setConversations((previous) => (Array.isArray(previous) ? previous : []).map((item) => (
@@ -1329,7 +1309,7 @@ function App() {
       if (titleAbortRef.current === controller) titleAbortRef.current = null
     })
     return undefined
-  }, [account, accountRemaining, activeConversationId, apiKey, baseUrl, conversations, enqueueProviderTask, guestUsed, historyReady, isBusy, isOwner, messages, model, provider, providerId, recordAccountTokens, setConversations, setGuestUsage, usageDate])
+  }, [account, accountRemaining, activeConversationId, apiKey, baseUrl, conversations, guestUsed, historyReady, isBusy, isOwner, messages, model, provider, providerId, recordAccountTokens, setConversations, setGuestUsage, usageDate])
 
   const resetConversationRun = useCallback(() => {
     setSteps([])
@@ -1802,9 +1782,10 @@ function App() {
   }, [])
 
   const send = useCallback(async (text, forcedMode) => {
-    // Naming the previous chat is cosmetic and must never compete with the reply
-    // the user just asked for.
-    titleAbortRef.current?.abort()
+    // Naming the previous chat is cosmetic. On providers that allow one request at
+    // a time, let a title already in flight finish: cancelling it can leave the
+    // provider still working, which makes the reply that follows fail with a 429.
+    if (!providerHasSingleRequestSlot(providerId)) titleAbortRef.current?.abort()
     const content = (text ?? input).trim()
     const target = mobileChatOnly ? 'chat' : (forcedMode ?? mode)
     const autoRouteToAgent = !mobileChatOnly && target === 'chat' && shouldRunWorkspaceAgent(content)
@@ -2104,11 +2085,7 @@ function App() {
       }
       try {
         await ensureDesktopRuntime()
-        if (providerId === 'javelinclouddirect' || providerId === 'javelincloud') {
-          await enqueueProviderTask(providerId, runReply, controller.signal)
-        } else {
-          await runReply()
-        }
+        await runReply()
 
         // Read the finished answer aloud when voice output is on. With several
         // replies in flight, speaking all of them at once would be unusable.
@@ -2375,7 +2352,7 @@ function App() {
       textareaRef.current?.focus()
     }
   }, [
-    apiKey, attachments, baseUrl, autonomy, beginChatResponse, enqueueProviderTask, finishChatResponse, generateImageMessage, imageBusy, imageMode, input, isBusy, isStreaming, messages, mobileChatOnly, mode, model, provider, providerId,
+    apiKey, attachments, baseUrl, autonomy, beginChatResponse, finishChatResponse, generateImageMessage, imageBusy, imageMode, input, isBusy, isStreaming, messages, mobileChatOnly, mode, model, provider, providerId,
     reserveAiUsage, recordAccountTokens, recordRunTokens,
     setMessages, setWorkspaceFiles, syncDesktopChanges, desktopApi, runDesktopCommand, ensureDesktopRuntime,
     // Without this, `send` kept the speakReply from the first render — whose live

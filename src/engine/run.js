@@ -392,7 +392,11 @@ export async function runAgent({
           // Free cloud tiers answer 503 "high demand" in short spikes; a slower retry
           // rides them out instead of failing the run on the first attempt.
           const overloaded = error?.status === 503 || /high demand|overloaded|temporarily unavailable/i.test(String(error?.message ?? ''))
-          await delay((overloaded ? 900 : 120) * 2 ** attempt, signal)
+          // A 429 from a one-slot provider means the previous request is still
+          // finishing. A short retry gets a real turn instead of finishing the run
+          // with the provider's busy message.
+          const rateLimited = error?.status === 429
+          await delay((rateLimited ? 1_500 : overloaded ? 900 : 120) * 2 ** attempt, signal)
         } catch {
           return { aborted: true }
         }

@@ -17,6 +17,7 @@
  */
 
 import { getProvider, installId, parseToolArguments, salvageToolCallsFromText } from '../lib/providers.js'
+import { enqueueProviderRequest } from '../lib/providerQueue.js'
 import { LOCAL_MAX_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS } from './limits.js'
 
 /** Extra attempts after the first request. */
@@ -344,7 +345,16 @@ async function readEventStream(response, { onToken, signal, onActivity }) {
  *
  * @returns {Promise<{content: string, toolCalls: object[], finishReason: string, usage: object|null, attempts: number, latencyMs: number}>}
  */
-export async function requestCompletion({
+export async function requestCompletion(options = {}) {
+  if (!options.transport) throw new Error('No model transport was configured.')
+  return enqueueProviderRequest(
+    options.transport.providerId,
+    () => requestCompletionUnqueued(options),
+    options.signal,
+  )
+}
+
+async function requestCompletionUnqueued({
   transport,
   messages,
   tools,
