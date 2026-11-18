@@ -468,6 +468,7 @@ function App() {
   const titleAttemptsRef = useRef(new Set())
   const titleAbortRef = useRef(null)
   const replyFormatCacheRef = useRef(new Map())
+  const playMessageRef = useRef(null)
 
   historyRef.current = { conversations, deleted: deletedConversations }
   activeConversationIdRef.current = activeConversationId
@@ -2571,6 +2572,12 @@ function App() {
       await speakReply(message.content, messageId, { force: true })
     })()
   }, [speakingMessageId, stopSpeaking, unlockSpeech, speakReply])
+  // A memoized row keeps its original callback; holding the newest playback
+  // implementation in a ref keeps voice settings current when that row is clicked.
+  playMessageRef.current = playMessage
+  const playMessageAction = useCallback((message, messageId) => {
+    playMessageRef.current?.(message, messageId)
+  }, [])
 
   // Hands-free conversation: listen, answer, speak, listen again. Switching it off
   // stops both halves, so the microphone is never left open by accident.
@@ -3330,12 +3337,11 @@ function App() {
             <Message
               key={m.id ?? m.ts ?? i}
               message={m}
+              messageId={m.id ?? i}
               richText={Boolean(replyFormats[i])}
               isStreaming={isStreaming && i === messages.length - 1 && m.role === 'assistant'}
               isSpeaking={speakingMessageId === (m.id ?? i)}
-              onPlay={m.role === 'assistant' && m.content && !m.image
-                ? () => playMessage(m, m.id ?? i)
-                : undefined}
+              onPlay={m.role === 'assistant' && m.content && !m.image ? playMessageAction : undefined}
             />
           ))}
 
@@ -4205,7 +4211,7 @@ function MessageAttachments({ attachments }) {
   )
 }
 
-const Message = memo(function Message({ message, isStreaming, onPlay, isSpeaking = false, richText = false }) {
+const Message = memo(function Message({ message, messageId, isStreaming, onPlay, isSpeaking = false, richText = false }) {
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
 
@@ -4286,7 +4292,7 @@ const Message = memo(function Message({ message, isStreaming, onPlay, isSpeaking
               <button
                 type="button"
                 className={`msg-copy msg-play${isSpeaking ? ' is-playing' : ''}`}
-                onClick={onPlay}
+                onClick={() => onPlay(message, messageId)}
                 aria-label={isSpeaking ? 'Stop reading this reply' : 'Play this reply aloud'}
                 aria-pressed={isSpeaking}
               >
@@ -4312,6 +4318,7 @@ const Message = memo(function Message({ message, isStreaming, onPlay, isSpeaking
   )
 }, (previous, next) => (
   previous.message === next.message &&
+  previous.messageId === next.messageId &&
   previous.isStreaming === next.isStreaming &&
   previous.isSpeaking === next.isSpeaking &&
   previous.richText === next.richText &&
