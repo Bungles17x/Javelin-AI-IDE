@@ -62,6 +62,9 @@ export async function generateChatTitle({
     apiKey,
     model,
     temperature: 0.4,
+    // A title is a handful of words; do not let this cosmetic request generate
+    // a full answer or hold the provider queue any longer than necessary.
+    maxTokens: 24,
     signal,
     messages: [
       { role: 'system', content: TITLE_SYSTEM_PROMPT },

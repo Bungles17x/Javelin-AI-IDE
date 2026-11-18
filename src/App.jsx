@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+﻿import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from './components/Button'
 import { Textarea } from './components/Textarea'
 import { Markdown } from './components/Markdown'
@@ -241,15 +241,47 @@ function load(key, fallback) {
   }
 }
 
-function useLocalStorage(key, initial) {
+function useLocalStorage(key, initial, persistDelayMs = 0) {
   const [value, setValue] = useState(() => load(key, initial))
+  const valueRef = useRef(value)
+  valueRef.current = value
+
   useEffect(() => {
-    try {
-      localStorage.setItem(key, JSON.stringify(value))
-    } catch {
-      /* quota / private mode - ignore */
+    const persist = () => {
+      try {
+        localStorage.setItem(key, JSON.stringify(valueRef.current))
+      } catch {
+        /* quota / private mode - ignore */
+      }
     }
-  }, [key, value])
+    if (!persistDelayMs) {
+      persist()
+      return undefined
+    }
+    // Streaming changes this value many times per second. Waiting for a short
+    // pause avoids serialising the whole thread on every token.
+    const timer = window.setTimeout(persist, persistDelayMs)
+    return () => window.clearTimeout(timer)
+  }, [key, persistDelayMs, value])
+
+  useEffect(() => {
+    if (!persistDelayMs) return undefined
+    const flush = () => {
+      try {
+        localStorage.setItem(key, JSON.stringify(valueRef.current))
+      } catch {
+        /* quota / private mode - ignore */
+      }
+    }
+    // A debounced write must not lose the last words when the window closes.
+    window.addEventListener('pagehide', flush)
+    window.addEventListener('beforeunload', flush)
+    return () => {
+      window.removeEventListener('pagehide', flush)
+      window.removeEventListener('beforeunload', flush)
+    }
+  }, [key, persistDelayMs])
+
   return [value, setValue]
 }
 
@@ -421,7 +453,7 @@ function App() {
     STORAGE.theme,
     window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
   )
-  const [messages, setMessages] = useLocalStorage(STORAGE.messages, [])
+  const [messages, setMessages] = useLocalStorage(STORAGE.messages, [], 400)
   const [conversations, setConversations] = useLocalStorage(STORAGE.conversations, [])
   const [activeConversationId, setActiveConversationId] = useLocalStorage(STORAGE.activeConversation, null)
   const [deletedConversations, setDeletedConversations] = useLocalStorage(STORAGE.deletedConversations, {})
@@ -434,6 +466,8 @@ function App() {
   const historySyncInFlightRef = useRef(false)
   const historySyncedFingerprintRef = useRef('')
   const titleAttemptsRef = useRef(new Set())
+  const titleAbortRef = useRef(null)
+  const replyFormatCacheRef = useRef(new Map())
 
   historyRef.current = { conversations, deleted: deletedConversations }
   activeConversationIdRef.current = activeConversationId
@@ -1261,6 +1295,8 @@ function App() {
         : item
     )))
     const controller = new AbortController()
+    titleAbortRef.current?.abort()
+    titleAbortRef.current = controller
     const requestTitle = () => generateChatTitle({
       providerId,
       baseUrl: baseUrl || provider.baseUrl,
@@ -1288,6 +1324,8 @@ function App() {
           ? { ...previous, count: Math.max(0, (Number(previous.count) || 0) - 1) }
           : previous)
       }
+    }).finally(() => {
+      if (titleAbortRef.current === controller) titleAbortRef.current = null
     })
     return undefined
   }, [account, accountRemaining, activeConversationId, apiKey, baseUrl, conversations, enqueueProviderTask, guestUsed, historyReady, isBusy, isOwner, messages, model, provider, providerId, recordAccountTokens, setConversations, setGuestUsage, usageDate])
@@ -1763,6 +1801,9 @@ function App() {
   }, [])
 
   const send = useCallback(async (text, forcedMode) => {
+    // Naming the previous chat is cosmetic and must never compete with the reply
+    // the user just asked for.
+    titleAbortRef.current?.abort()
     const content = (text ?? input).trim()
     const target = mobileChatOnly ? 'chat' : (forcedMode ?? mode)
     const autoRouteToAgent = !mobileChatOnly && target === 'chat' && shouldRunWorkspaceAgent(content)
@@ -2757,9 +2798,20 @@ function App() {
   const activeConversationTitle = activeConversation?.title || conversationTitle(messages)
   const replyFormats = useMemo(() => {
     let request = ''
-    return messages.map((message) => {
+    const cache = replyFormatCacheRef.current
+    return messages.map((message, index) => {
       if (message?.role === 'user') request = messageText(message)
-      return message?.role === 'assistant' ? shouldUseMarkdown(messageText(message), request) : false
+      if (message?.role !== 'assistant') return false
+      const content = messageText(message)
+      const key = message.id ?? `index:${index}`
+      const cached = cache.get(key)
+      // Only the reply being streamed changes during a response. Reuse the
+      // format decision for every earlier message instead of rescanning it
+      // twenty times a second.
+      if (cached?.content === content && cached.request === request) return cached.richText
+      const richText = shouldUseMarkdown(content, request)
+      cache.set(key, { content, request, richText })
+      return richText
     })
   }, [messages])
   const historySyncLabel = !account
@@ -4153,7 +4205,7 @@ function MessageAttachments({ attachments }) {
   )
 }
 
-function Message({ message, isStreaming, onPlay, isSpeaking = false, richText = false }) {
+const Message = memo(function Message({ message, isStreaming, onPlay, isSpeaking = false, richText = false }) {
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
 
@@ -4258,6 +4310,14 @@ function Message({ message, isStreaming, onPlay, isSpeaking = false, richText = 
       )}
     </div>
   )
-}
+}, (previous, next) => (
+  previous.message === next.message &&
+  previous.isStreaming === next.isStreaming &&
+  previous.isSpeaking === next.isSpeaking &&
+  previous.richText === next.richText &&
+  // The click handler closes over the same message/play state for a row whose
+  // visible props did not change. Compare presence, not a fresh function identity.
+  Boolean(previous.onPlay) === Boolean(next.onPlay)
+))
 
 export default App

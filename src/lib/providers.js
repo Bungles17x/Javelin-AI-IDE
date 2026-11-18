@@ -322,10 +322,11 @@ export function modelsFor(providerId, customModel) {
  * @param {(call: {id: string, name: string, args: any}) => void} [opts.onToolCall]
  * @param {AbortSignal} [opts.signal]
  * @param {number} [opts.temperature]
+ * @param {number} [opts.maxTokens] optional output cap for short tasks such as chat and titles
  * @returns {Promise<{content: string, toolCalls: {id: string, name: string, args: any}[], finishReason: string, usage: object|null}>}
  */
 export async function streamCompletion({
-  providerId = DEFAULT_PROVIDER,
+  providerId,
   baseUrl,
   apiKey,
   model,
@@ -335,13 +336,15 @@ export async function streamCompletion({
   onToolCall,
   signal,
   temperature = 0.2,
+  maxTokens,
 }) {
-  const provider = getProvider(providerId)
+  const selectedProviderId = providerId || DEFAULT_PROVIDER
+  const provider = getProvider(selectedProviderId)
 
   const endpoint = (baseUrl || provider.baseUrl || '').replace(/\/$/, '')
   if (!endpoint) {
     throw codeError(
-      new Error(`${provider.label ?? providerId} needs an endpoint URL. Open Settings and paste the https URL of your model server.`),
+      new Error(`${provider.label ?? selectedProviderId} needs an endpoint URL. Open Settings and paste the https URL of your model server.`),
       ERROR_CODES.MODEL_CONFIG,
     )
   }
@@ -359,7 +362,7 @@ export async function streamCompletion({
   if (hosted) {
     if (!apiKey && !provider.keyless) {
       throw codeError(
-        new Error(`${provider.label ?? providerId} requires an API key. Open Settings and add one.`),
+        new Error(`${provider.label ?? selectedProviderId} requires an API key. Open Settings and add one.`),
         ERROR_CODES.MODEL_AUTH,
       )
     }
@@ -370,7 +373,10 @@ export async function streamCompletion({
     // Ollama and Javelin's own local server can run on another machine on the same
     // network. Only the explicitly selected local providers get this exception;
     // they never receive an API key. Browsers still enforce mixed-content rules.
-    const remoteLocalServer = providerId === 'javelin' || providerId === 'local' || providerId === 'javelinlocal'
+    // A caller that did not select a provider falls back to the local default;
+    // that implicit default must not turn a remote URL into an allowed endpoint.
+    const remoteLocalServer = Boolean(providerId) &&
+      (selectedProviderId === 'javelin' || selectedProviderId === 'local' || selectedProviderId === 'javelinlocal')
     if (!remoteLocalServer) {
       throw codeError(
         new Error('Javelin only connects to a server on this computer (localhost). Remote AI endpoints are disabled.'),
@@ -404,6 +410,7 @@ export async function streamCompletion({
     messages,
     temperature,
     stream: true,
+    ...(Number.isFinite(maxTokens) && maxTokens > 0 ? { max_tokens: Math.floor(maxTokens) } : {}),
     ...(tools?.length ? { tools, tool_choice: 'auto' } : {}),
     // Ask hosted providers to include the usage totals in the final chunk so
     // signed-in token accounting can use exact numbers when they are offered.
@@ -429,9 +436,9 @@ export async function streamCompletion({
     throw codeError(
       new Error(
         timedOut
-          ? `${provider.label ?? providerId} did not answer within ${Math.round(timeoutMs / 1000)}s. Free tiers are often busy — try again, or switch provider in Settings.`
+          ? `${provider.label ?? selectedProviderId} did not answer within ${Math.round(timeoutMs / 1000)}s. Free tiers are often busy — try again, or switch provider in Settings.`
           : hosted
-            ? `Could not reach ${provider.label ?? providerId} at ${endpoint}. Check the endpoint and your network connection.`
+            ? `Could not reach ${provider.label ?? selectedProviderId} at ${endpoint}. Check the endpoint and your network connection.`
             : provider.localServer
               ? `Could not reach your own model server at ${endpoint}. Start it with "npm run serve:knowledge" — it serves Javelin Chatting Knowledge and Javelin Coder 1.5B — then try again.`
               : `Could not reach Ollama at ${endpoint}. Start Ollama, confirm it is listening on port 11434, and make sure this device can reach that address. ${provider.help}`,

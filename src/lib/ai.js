@@ -33,7 +33,42 @@ export const SYSTEM_PROMPT = [
   '- Do not pad answers with unnecessary explanation.',
 ].join('\n')
 
-const MAX_HISTORY_MESSAGES = 20
+// Keep the request small enough to start quickly. Sixteen turns cover a normal
+// back-and-forth; the character budget keeps pasted files and long answers from
+// turning every follow-up into a large prefill.
+const MAX_HISTORY_MESSAGES = 16
+const MAX_HISTORY_CHARS = 32_000
+// A chat answer is bounded so a rambling model cannot monopolise the UI. Agent
+// mode keeps its larger budget because it must write whole files. A model running
+// on this computer is capped lower again: local generation is far slower.
+export const CHAT_MAX_OUTPUT_TOKENS = 3_072
+export const LOCAL_CHAT_MAX_OUTPUT_TOKENS = 1_200
+
+function messageCharCount(message) {
+  const content = message?.content
+  return typeof content === 'string' ? content.length : JSON.stringify(content ?? '').length
+}
+
+/** Keep the most recent turns within both the message and character budgets. */
+export function trimChatHistory(messages, {
+  maxMessages = MAX_HISTORY_MESSAGES,
+  maxChars = MAX_HISTORY_CHARS,
+} = {}) {
+  if (!Array.isArray(messages) || messages.length === 0) return []
+  const kept = []
+  let chars = 0
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (!message) continue
+    if (kept.length >= maxMessages) break
+    const size = messageCharCount(message)
+    // Always keep the newest message, even if it is one large pasted file.
+    if (kept.length > 0 && chars + size > maxChars) break
+    kept.unshift(message)
+    chars += size
+  }
+  return kept
+}
 
 /**
  * Backwards-compatible chat helper used by the simple chat view.
@@ -48,8 +83,11 @@ export async function streamChat({
   signal,
   providerId = DEFAULT_PROVIDER,
   baseUrl,
+  maxTokens,
 }) {
-  const history = messages.slice(-MAX_HISTORY_MESSAGES)
+  const history = trimChatHistory(messages)
+  const provider = PROVIDERS[providerId] ?? PROVIDERS[DEFAULT_PROVIDER]
+  const outputLimit = maxTokens ?? (provider.hosted ? CHAT_MAX_OUTPUT_TOKENS : LOCAL_CHAT_MAX_OUTPUT_TOKENS)
   const lastUserIndex = history.map((m) => m?.role).lastIndexOf('user')
 
   // Resolve "why?", "you?", "same" against the thread instead of answering the
@@ -80,6 +118,7 @@ export async function streamChat({
     apiKey,
     model,
     messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...prepared],
+    maxTokens: outputLimit,
     onToken,
     signal,
   })
